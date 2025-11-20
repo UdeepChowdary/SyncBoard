@@ -191,6 +191,19 @@ function CanvasBoard({ socket, roomId = 'default-room' }) {
     })
   }
 
+  const handleExport = () => {
+    if (!stageRef.current) return
+
+    const uri = stageRef.current.toDataURL({ pixelRatio: 2 })
+
+    const link = document.createElement('a')
+    link.href = uri
+    link.download = `syncboard-${roomId || 'board'}.png`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+  }
+
   return (
     <div className="canvas-container">
       <div className="toolbar" style={{ display: 'flex', gap: '1rem', marginBottom: '0.75rem', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -284,22 +297,40 @@ function CanvasBoard({ socket, roomId = 'default-room' }) {
           </label>
         </div>
 
-        <button
-          type="button"
-          onClick={handleClear}
-          style={{
-            padding: '0.35rem 0.9rem',
-            borderRadius: '999px',
-            border: '1px solid #4b5563',
-            backgroundColor: '#111827',
-            color: '#e5e7eb',
-            cursor: 'pointer',
-          }}
-        >
-          Clear board
-        </button>
+        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+          <button
+            type="button"
+            onClick={handleClear}
+            style={{
+              padding: '0.35rem 0.9rem',
+              borderRadius: '999px',
+              border: '1px solid #4b5563',
+              backgroundColor: '#111827',
+              color: '#e5e7eb',
+              cursor: 'pointer',
+              fontSize: 12,
+            }}
+          >
+            Clear
+          </button>
 
-        <div style={{ display: 'flex', gap: '0.5rem', marginLeft: '1rem' }}>
+          <button
+            type="button"
+            onClick={handleExport}
+            style={{
+              padding: '0.35rem 0.9rem',
+              borderRadius: '999px',
+              border: '1px solid #4b5563',
+              backgroundColor: '#111827',
+              color: '#e5e7eb',
+              cursor: 'pointer',
+              fontSize: 12,
+            }}
+          >
+            Export PNG
+          </button>
+
+          <div style={{ display: 'flex', gap: '0.5rem', marginLeft: '0.5rem' }}>
           <button
             type="button"
             onClick={handleUndo}
@@ -333,6 +364,7 @@ function CanvasBoard({ socket, roomId = 'default-room' }) {
           >
             Redo
           </button>
+          </div>
         </div>
       </div>
 
