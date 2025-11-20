@@ -4,6 +4,8 @@ import { Stage, Layer, Line, Rect, Circle } from 'react-konva'
 function CanvasBoard({ socket, roomId = 'default-room' }) {
   const stageRef = useRef(null)
   const [strokes, setStrokes] = useState([])
+  const [past, setPast] = useState([])
+  const [future, setFuture] = useState([])
   const [isDrawing, setIsDrawing] = useState(false)
   const [color, setColor] = useState('#ffffff')
   const [strokeWidth, setStrokeWidth] = useState(3)
@@ -21,20 +23,36 @@ function CanvasBoard({ socket, roomId = 'default-room' }) {
 
     const handleRemoteClear = () => {
       setStrokes([])
+      setPast([])
+      setFuture([])
+    }
+
+    const handleRemoteSnapshot = (remoteStrokes) => {
+      console.log('[CanvasBoard] received board:snapshot')
+      setStrokes(remoteStrokes || [])
+      setPast([])
+      setFuture([])
     }
 
     socket.on('stroke:created', handleRemoteStroke)
     socket.on('board:clear', handleRemoteClear)
+    socket.on('board:snapshot', handleRemoteSnapshot)
 
     return () => {
       console.log('[CanvasBoard] cleanup listeners for room', roomId)
       socket.off('stroke:created', handleRemoteStroke)
       socket.off('board:clear', handleRemoteClear)
+      socket.off('board:snapshot', handleRemoteSnapshot)
     }
   }, [socket, roomId])
 
   const handleMouseDown = (e) => {
     setIsDrawing(true)
+
+    // Save current state to history for undo
+    setPast((prev) => [...prev, JSON.parse(JSON.stringify(strokes))])
+    setFuture([])
+
     const stage = stageRef.current
     const pointerPosition = stage.getPointerPosition()
 
@@ -117,6 +135,9 @@ function CanvasBoard({ socket, roomId = 'default-room' }) {
   }
 
   const handleClear = () => {
+    // Save current state before clearing
+    setPast((prev) => [...prev, JSON.parse(JSON.stringify(strokes))])
+    setFuture([])
     setStrokes([])
 
     if (socket) {
@@ -126,6 +147,49 @@ function CanvasBoard({ socket, roomId = 'default-room' }) {
 
   const width = window.innerWidth
   const height = window.innerHeight
+
+  const canUndo = past.length > 0
+  const canRedo = future.length > 0
+
+  const handleUndo = () => {
+    if (!canUndo) return
+
+    setPast((prevPast) => {
+      if (prevPast.length === 0) return prevPast
+      const newPast = prevPast.slice(0, prevPast.length - 1)
+      const previous = prevPast[prevPast.length - 1]
+
+      setFuture((prevFuture) => [...prevFuture, JSON.parse(JSON.stringify(strokes))])
+      const snapshot = previous || []
+      setStrokes(snapshot)
+
+      if (socket) {
+        socket.emit('board:snapshot', { roomId, strokes: snapshot })
+      }
+
+      return newPast
+    })
+  }
+
+  const handleRedo = () => {
+    if (!canRedo) return
+
+    setFuture((prevFuture) => {
+      if (prevFuture.length === 0) return prevFuture
+      const newFuture = prevFuture.slice(0, prevFuture.length - 1)
+      const next = prevFuture[prevFuture.length - 1]
+
+      setPast((prevPast) => [...prevPast, JSON.parse(JSON.stringify(strokes))])
+      const snapshot = next || []
+      setStrokes(snapshot)
+
+      if (socket) {
+        socket.emit('board:snapshot', { roomId, strokes: snapshot })
+      }
+
+      return newFuture
+    })
+  }
 
   return (
     <div className="canvas-container">
@@ -234,6 +298,42 @@ function CanvasBoard({ socket, roomId = 'default-room' }) {
         >
           Clear board
         </button>
+
+        <div style={{ display: 'flex', gap: '0.5rem', marginLeft: '1rem' }}>
+          <button
+            type="button"
+            onClick={handleUndo}
+            disabled={!canUndo}
+            style={{
+              padding: '0.35rem 0.75rem',
+              borderRadius: '999px',
+              border: '1px solid #4b5563',
+              backgroundColor: canUndo ? '#111827' : '#020617',
+              color: canUndo ? '#e5e7eb' : '#6b7280',
+              cursor: canUndo ? 'pointer' : 'not-allowed',
+              fontSize: 12,
+            }}
+          >
+            Undo
+          </button>
+
+          <button
+            type="button"
+            onClick={handleRedo}
+            disabled={!canRedo}
+            style={{
+              padding: '0.35rem 0.75rem',
+              borderRadius: '999px',
+              border: '1px solid #4b5563',
+              backgroundColor: canRedo ? '#111827' : '#020617',
+              color: canRedo ? '#e5e7eb' : '#6b7280',
+              cursor: canRedo ? 'pointer' : 'not-allowed',
+              fontSize: 12,
+            }}
+          >
+            Redo
+          </button>
+        </div>
       </div>
 
       <Stage

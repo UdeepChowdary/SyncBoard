@@ -40,6 +40,12 @@ io.on('connection', (socket) => {
     socket.to(roomId).emit('board:clear');
   });
 
+  socket.on('board:snapshot', (payload: { roomId: string; strokes: unknown }) => {
+    const { roomId, strokes } = payload;
+    console.log('board:snapshot from', socket.id, 'room', roomId);
+    socket.to(roomId).emit('board:snapshot', strokes);
+  });
+
   socket.on('disconnect', () => {
     console.log('Client disconnected:', socket.id);
   });
