@@ -1,30 +1,64 @@
 import { useEffect, useRef, useState } from 'react'
-import { Stage, Layer, Line, Rect, Circle } from 'react-konva'
+import { Stage, Layer, Line, Rect, Circle, Group, Text, Transformer } from 'react-konva'
 
-function CanvasBoard({ socket, roomId = 'default-room' }) {
+function RemoteCursor({ x, y, nickname, color }) {
+  return (
+    <Group x={x} y={y}>
+      <Circle radius={6} fill={color} stroke="#fff" strokeWidth={1} />
+      <Text
+        text={nickname}
+        x={10}
+        y={-5}
+        fontSize={12}
+        fill={color}
+        fontStyle="bold"
+        shadowColor="rgba(0,0,0,0.5)"
+        shadowBlur={2}
+      />
+    </Group>
+  )
+}
+
+function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
   const stageRef = useRef(null)
-  const [strokes, setStrokes] = useState([])
+  const [strokes, setStrokes] = useState([]) // Array of shapes with IDs
   const [past, setPast] = useState([])
   const [future, setFuture] = useState([])
   const [isDrawing, setIsDrawing] = useState(false)
   const [color, setColor] = useState('#ffffff')
   const [strokeWidth, setStrokeWidth] = useState(3)
-  const [tool, setTool] = useState('pen') // 'pen' | 'rect' | 'circle' | 'eraser'
+  const [tool, setTool] = useState('pen') // 'select' | 'pen' | 'rect' | 'circle' | 'eraser'
+  const [selectedId, setSelectedId] = useState(null) // ID of the selected shape
+
+  // Remote cursors state: { [socketId]: { x, y, nickname, color } }
+  const [remoteUsers, setRemoteUsers] = useState({})
 
   useEffect(() => {
     if (!socket) return
 
     console.log('[CanvasBoard] joining room', roomId, 'with socket', socket.id)
-    socket.emit('join_room', roomId)
+    socket.emit('join_room', roomId, nickname)
 
     const handleRemoteStroke = (stroke) => {
       setStrokes((prev) => [...prev, stroke])
+    }
+
+    const handleRemoteUpdate = (updatedShape) => {
+      setStrokes((prev) => prev.map(s => s.id === updatedShape.id ? updatedShape : s))
+    }
+
+    const handleRemoteDelete = (shapeId) => {
+      setStrokes((prev) => prev.filter(s => s.id !== shapeId))
+      if (selectedId === shapeId) {
+        setSelectedId(null)
+      }
     }
 
     const handleRemoteClear = () => {
       setStrokes([])
       setPast([])
       setFuture([])
+      setSelectedId(null)
     }
 
     const handleRemoteSnapshot = (remoteStrokes) => {
@@ -32,22 +66,89 @@ function CanvasBoard({ socket, roomId = 'default-room' }) {
       setStrokes(remoteStrokes || [])
       setPast([])
       setFuture([])
+      setSelectedId(null)
+    }
+
+    const handleCursorMove = ({ socketId, x, y, nickname: remoteName, color }) => {
+      setRemoteUsers((prev) => ({
+        ...prev,
+        [socketId]: { x, y, nickname: remoteName, color }
+      }))
+    }
+
+    const handleUserLeft = ({ socketId }) => {
+      setRemoteUsers((prev) => {
+        const next = { ...prev }
+        delete next[socketId]
+        return next
+      })
     }
 
     socket.on('stroke:created', handleRemoteStroke)
+    socket.on('shape:update', handleRemoteUpdate)
+    socket.on('shape:delete', handleRemoteDelete)
     socket.on('board:clear', handleRemoteClear)
     socket.on('board:snapshot', handleRemoteSnapshot)
+    socket.on('cursor:move', handleCursorMove)
+    socket.on('user:left', handleUserLeft)
 
     return () => {
       console.log('[CanvasBoard] cleanup listeners for room', roomId)
       socket.off('stroke:created', handleRemoteStroke)
+      socket.off('shape:update', handleRemoteUpdate)
+      socket.off('shape:delete', handleRemoteDelete)
       socket.off('board:clear', handleRemoteClear)
       socket.off('board:snapshot', handleRemoteSnapshot)
+      socket.off('cursor:move', handleCursorMove)
+      socket.off('user:left', handleUserLeft)
     }
-  }, [socket, roomId])
+  }, [socket, roomId, nickname])
+
+  // Keydown listener for Deletion
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedId) {
+        // Delete selected shape
+        const shapeToDelete = strokes.find(s => s.id === selectedId)
+        if (shapeToDelete) {
+          setStrokes(prev => prev.filter(s => s.id !== selectedId))
+          setSelectedId(null)
+          if (socket) {
+            socket.emit('shape:delete', { roomId, shapeId: selectedId })
+          }
+        }
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [selectedId, strokes, socket, roomId])
+
 
   const handleMouseDown = (e) => {
+    // If we are in select mode
+    if (tool === 'select') {
+      // Check if we clicked on a transformer
+      const clickedOnTransformer = e.target.getParent()?.className === 'Transformer';
+      if (clickedOnTransformer) {
+        return;
+      }
+
+      const clickedOnEmpty = e.target === e.target.getStage()
+      if (clickedOnEmpty) {
+        setSelectedId(null)
+        return
+      }
+      const clickedId = e.target.id()
+      if (clickedId) {
+        setSelectedId(clickedId)
+      } else {
+        setSelectedId(null)
+      }
+      return
+    }
+
     setIsDrawing(true)
+    setSelectedId(null) // Deselect when drawing new things
 
     // Save current state to history for undo
     setPast((prev) => [...prev, JSON.parse(JSON.stringify(strokes))])
@@ -59,33 +160,33 @@ function CanvasBoard({ socket, roomId = 'default-room' }) {
     const effectiveColor = tool === 'eraser' ? '#111827' : color
     const effectiveWidth = tool === 'eraser' ? Math.max(strokeWidth * 2, 10) : strokeWidth
 
-    let newShape
+    let newShape = {
+      id: crypto.randomUUID(), // Generate unique ID
+      tool,
+      color: effectiveColor,
+      strokeWidth: effectiveWidth,
+    }
 
     if (tool === 'pen' || tool === 'eraser') {
       newShape = {
-        tool: 'pen',
+        ...newShape,
+        tool: 'pen', // Eraser is just a pen with background color
         points: [pointerPosition.x, pointerPosition.y],
-        color: effectiveColor,
-        strokeWidth: effectiveWidth,
       }
     } else if (tool === 'rect') {
       newShape = {
-        tool: 'rect',
+        ...newShape,
         x: pointerPosition.x,
         y: pointerPosition.y,
         width: 0,
         height: 0,
-        color,
-        strokeWidth,
       }
     } else if (tool === 'circle') {
       newShape = {
-        tool: 'circle',
+        ...newShape,
         x: pointerPosition.x,
         y: pointerPosition.y,
         radius: 0,
-        color,
-        strokeWidth,
       }
     }
 
@@ -93,10 +194,17 @@ function CanvasBoard({ socket, roomId = 'default-room' }) {
   }
 
   const handleMouseMove = (e) => {
-    if (!isDrawing) return
-
     const stage = stageRef.current
+    if (!stage) return
     const point = stage.getPointerPosition()
+
+    // Emit cursor position
+    if (socket) {
+      socket.emit('cursor:move', { roomId, x: point.x, y: point.y })
+    }
+
+    if (!isDrawing) return
+    if (tool === 'select') return // Do nothing for drawing if selecting
 
     setStrokes((prev) => {
       const strokesCopy = [...prev]
@@ -119,6 +227,8 @@ function CanvasBoard({ socket, roomId = 'default-room' }) {
   }
 
   const handleMouseUp = () => {
+    if (tool === 'select') return
+
     setIsDrawing(false)
 
     if (!socket) return
@@ -134,11 +244,78 @@ function CanvasBoard({ socket, roomId = 'default-room' }) {
     })
   }
 
+  // --- Transformation Handlers ---
+
+  const handleDragEnd = (e) => {
+    const id = e.target.id()
+    if (!id) return
+
+    // Find the shape and update its coords
+    const shape = strokes.find(s => s.id === id)
+    if (!shape) return
+
+    const newAttrs = {
+      x: e.target.x(),
+      y: e.target.y()
+    }
+
+    const updatedShape = { ...shape, ...newAttrs }
+    setStrokes(prev => prev.map(s => s.id === id ? updatedShape : s))
+
+    if (socket) {
+      socket.emit('shape:update', { roomId, shape: updatedShape })
+    }
+  }
+
+  const handleTransformEnd = (e) => {
+    const node = e.target
+    const id = node.id()
+    if (!id) return
+
+    const shape = strokes.find(s => s.id === id)
+    if (!shape) return
+
+    const scaleX = node.scaleX()
+    const scaleY = node.scaleY()
+
+    node.scaleX(1)
+    node.scaleY(1)
+
+    let updatedShape = { ...shape, x: node.x(), y: node.y(), rotation: node.rotation() }
+
+    if (shape.tool === 'rect') {
+      updatedShape.width = node.width() * scaleX
+      updatedShape.height = node.height() * scaleY
+    } else if (shape.tool === 'circle') {
+      updatedShape.radius = node.radius() * Math.max(Math.abs(scaleX), Math.abs(scaleY))
+    } else {
+      node.scaleX(scaleX)
+      node.scaleY(scaleY)
+      updatedShape = {
+        ...shape,
+        x: node.x(),
+        y: node.y(),
+        rotation: node.rotation(),
+        scaleX: scaleX,
+        scaleY: scaleY
+      }
+    }
+
+    setStrokes(prev => prev.map(s => s.id === id ? updatedShape : s))
+
+    if (socket) {
+      socket.emit('shape:update', { roomId, shape: updatedShape })
+    }
+  }
+
+
+
   const handleClear = () => {
     // Save current state before clearing
     setPast((prev) => [...prev, JSON.parse(JSON.stringify(strokes))])
     setFuture([])
     setStrokes([])
+    setSelectedId(null)
 
     if (socket) {
       socket.emit('board:clear', { roomId })
@@ -162,6 +339,7 @@ function CanvasBoard({ socket, roomId = 'default-room' }) {
       setFuture((prevFuture) => [...prevFuture, JSON.parse(JSON.stringify(strokes))])
       const snapshot = previous || []
       setStrokes(snapshot)
+      setSelectedId(null)
 
       if (socket) {
         socket.emit('board:snapshot', { roomId, strokes: snapshot })
@@ -182,6 +360,7 @@ function CanvasBoard({ socket, roomId = 'default-room' }) {
       setPast((prevPast) => [...prevPast, JSON.parse(JSON.stringify(strokes))])
       const snapshot = next || []
       setStrokes(snapshot)
+      setSelectedId(null)
 
       if (socket) {
         socket.emit('board:snapshot', { roomId, strokes: snapshot })
@@ -209,9 +388,26 @@ function CanvasBoard({ socket, roomId = 'default-room' }) {
       <div className="toolbar" style={{ display: 'flex', gap: '1rem', marginBottom: '0.75rem', alignItems: 'center', justifyContent: 'space-between' }}>
         <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
           <div style={{ display: 'flex', gap: '0.5rem' }}>
+
             <button
               type="button"
-              onClick={() => setTool('pen')}
+              onClick={() => { setTool('select'); setSelectedId(null); }}
+              style={{
+                padding: '0.35rem 0.75rem',
+                borderRadius: '999px',
+                border: tool === 'select' ? '1px solid #d1d5db' : '1px solid #4b5563',
+                backgroundColor: tool === 'select' ? '#111827' : '#020617',
+                color: '#e5e7eb',
+                cursor: 'pointer',
+                fontSize: 12,
+              }}
+            >
+              Select
+            </button>
+
+            <button
+              type="button"
+              onClick={() => { setTool('pen'); setSelectedId(null); }}
               style={{
                 padding: '0.35rem 0.75rem',
                 borderRadius: '999px',
@@ -227,7 +423,7 @@ function CanvasBoard({ socket, roomId = 'default-room' }) {
 
             <button
               type="button"
-              onClick={() => setTool('rect')}
+              onClick={() => { setTool('rect'); setSelectedId(null); }}
               style={{
                 padding: '0.35rem 0.75rem',
                 borderRadius: '999px',
@@ -243,7 +439,7 @@ function CanvasBoard({ socket, roomId = 'default-room' }) {
 
             <button
               type="button"
-              onClick={() => setTool('circle')}
+              onClick={() => { setTool('circle'); setSelectedId(null); }}
               style={{
                 padding: '0.35rem 0.75rem',
                 borderRadius: '999px',
@@ -259,7 +455,7 @@ function CanvasBoard({ socket, roomId = 'default-room' }) {
 
             <button
               type="button"
-              onClick={() => setTool('eraser')}
+              onClick={() => { setTool('eraser'); setSelectedId(null); }}
               style={{
                 padding: '0.35rem 0.75rem',
                 borderRadius: '999px',
@@ -331,39 +527,39 @@ function CanvasBoard({ socket, roomId = 'default-room' }) {
           </button>
 
           <div style={{ display: 'flex', gap: '0.5rem', marginLeft: '0.5rem' }}>
-          <button
-            type="button"
-            onClick={handleUndo}
-            disabled={!canUndo}
-            style={{
-              padding: '0.35rem 0.75rem',
-              borderRadius: '999px',
-              border: '1px solid #4b5563',
-              backgroundColor: canUndo ? '#111827' : '#020617',
-              color: canUndo ? '#e5e7eb' : '#6b7280',
-              cursor: canUndo ? 'pointer' : 'not-allowed',
-              fontSize: 12,
-            }}
-          >
-            Undo
-          </button>
+            <button
+              type="button"
+              onClick={handleUndo}
+              disabled={!canUndo}
+              style={{
+                padding: '0.35rem 0.75rem',
+                borderRadius: '999px',
+                border: '1px solid #4b5563',
+                backgroundColor: canUndo ? '#111827' : '#020617',
+                color: canUndo ? '#e5e7eb' : '#6b7280',
+                cursor: canUndo ? 'pointer' : 'not-allowed',
+                fontSize: 12,
+              }}
+            >
+              Undo
+            </button>
 
-          <button
-            type="button"
-            onClick={handleRedo}
-            disabled={!canRedo}
-            style={{
-              padding: '0.35rem 0.75rem',
-              borderRadius: '999px',
-              border: '1px solid #4b5563',
-              backgroundColor: canRedo ? '#111827' : '#020617',
-              color: canRedo ? '#e5e7eb' : '#6b7280',
-              cursor: canRedo ? 'pointer' : 'not-allowed',
-              fontSize: 12,
-            }}
-          >
-            Redo
-          </button>
+            <button
+              type="button"
+              onClick={handleRedo}
+              disabled={!canRedo}
+              style={{
+                padding: '0.35rem 0.75rem',
+                borderRadius: '999px',
+                border: '1px solid #4b5563',
+                backgroundColor: canRedo ? '#111827' : '#020617',
+                color: canRedo ? '#e5e7eb' : '#6b7280',
+                cursor: canRedo ? 'pointer' : 'not-allowed',
+                fontSize: 12,
+              }}
+            >
+              Redo
+            </button>
           </div>
         </div>
       </div>
@@ -378,14 +574,31 @@ function CanvasBoard({ socket, roomId = 'default-room' }) {
         style={{ backgroundColor: '#111827', borderRadius: '0.75rem' }}
       >
         <Layer>
-          {strokes.map((shape, idx) => {
+          {strokes.map((shape) => {
+            const isSelected = shape.id === selectedId
+            const commonProps = {
+              key: shape.id,
+              id: shape.id,
+              draggable: tool === 'select',
+              onDragEnd: handleDragEnd,
+              onTransformEnd: handleTransformEnd,
+              opacity: 1,
+              // Apply transforms if they exist
+              x: shape.x || 0,
+              y: shape.y || 0,
+              rotation: shape.rotation || 0,
+              scaleX: shape.scaleX || 1,
+              scaleY: shape.scaleY || 1,
+            }
+
             if (shape.tool === 'pen') {
               return (
                 <Line
-                  key={idx}
+                  {...commonProps}
                   points={shape.points}
                   stroke={shape.color}
                   strokeWidth={shape.strokeWidth}
+                  hitStrokeWidth={25}
                   tension={0.5}
                   lineCap="round"
                   lineJoin="round"
@@ -396,14 +609,11 @@ function CanvasBoard({ socket, roomId = 'default-room' }) {
             if (shape.tool === 'rect') {
               return (
                 <Rect
-                  key={idx}
-                  x={shape.x}
-                  y={shape.y}
+                  {...commonProps}
                   width={shape.width}
                   height={shape.height}
                   stroke={shape.color}
                   strokeWidth={shape.strokeWidth}
-                  listening={false}
                 />
               )
             }
@@ -411,23 +621,63 @@ function CanvasBoard({ socket, roomId = 'default-room' }) {
             if (shape.tool === 'circle') {
               return (
                 <Circle
-                  key={idx}
-                  x={shape.x}
-                  y={shape.y}
+                  {...commonProps}
                   radius={shape.radius}
                   stroke={shape.color}
                   strokeWidth={shape.strokeWidth}
-                  listening={false}
                 />
               )
             }
 
             return null
           })}
+
+          {/* Transformer */}
+          <TransformerComponent selectedShape={strokes.find(s => s.id === selectedId)} />
+
+        </Layer>
+
+        {/* Remote Cursors Layer */}
+        <Layer>
+          {Object.keys(remoteUsers).map(socketId => {
+            const user = remoteUsers[socketId]
+            return (
+              <RemoteCursor
+                key={socketId}
+                x={user.x}
+                y={user.y}
+                nickname={user.nickname}
+                color={user.color}
+              />
+            )
+          })}
         </Layer>
       </Stage>
     </div>
   )
+}
+
+// Helper to attach transformer to selected node
+const TransformerComponent = ({ selectedShape }) => {
+  const trRef = useRef(null)
+
+  useEffect(() => {
+    if (selectedShape && trRef.current) {
+      // Find the selected node
+      const stage = trRef.current.getStage()
+      const selectedNode = stage.findOne('#' + selectedShape.id)
+      if (selectedNode) {
+        trRef.current.nodes([selectedNode])
+        trRef.current.getLayer().batchDraw()
+      } else {
+        trRef.current.nodes([])
+      }
+    } else if (trRef.current) {
+      trRef.current.nodes([])
+    }
+  }, [selectedShape])
+
+  return <Transformer ref={trRef} />
 }
 
 export default CanvasBoard

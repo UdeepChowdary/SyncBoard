@@ -25,12 +25,26 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok' });
 });
 
+// Map to store user info: socketId -> { roomId, nickname, color }
+const users = new Map<string, { roomId: string; nickname: string; color: string }>();
+
+const getRandomColor = () => {
+  const colors = ['#ef4444', '#f97316', '#f59e0b', '#84cc16', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6', '#d946ef', '#f43f5e'];
+  return colors[Math.floor(Math.random() * colors.length)];
+};
+
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
 
-  socket.on('join_room', async (roomId: string) => {
-    console.log(`Socket ${socket.id} joining room`, roomId);
+  socket.on('join_room', async (roomId: string, nickname: string = 'Guest') => {
+    console.log(`Socket ${socket.id} joining room`, roomId, 'as', nickname);
     socket.join(roomId);
+
+    users.set(socket.id, {
+      roomId,
+      nickname,
+      color: getRandomColor()
+    });
 
     try {
       let room = await RoomModel.findOne({ roomId }).lean();
@@ -47,10 +61,51 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('stroke:created', (payload: { roomId: string; stroke: unknown }) => {
+  socket.on('stroke:created', async (payload: { roomId: string; stroke: unknown }) => {
     const { roomId, stroke } = payload;
-    console.log('stroke:created from', socket.id, 'room', roomId);
+    // console.log('stroke:created from', socket.id, 'room', roomId);
     socket.to(roomId).emit('stroke:created', stroke);
+
+    try {
+      await RoomModel.findOneAndUpdate(
+        { roomId },
+        { $push: { strokes: stroke } }
+      );
+    } catch (err) {
+      console.error('Error saving stroke for', roomId, err);
+    }
+  });
+
+  socket.on('shape:update', async (payload: { roomId: string; shape: any }) => {
+    const { roomId, shape } = payload;
+    socket.to(roomId).emit('shape:update', shape);
+
+    try {
+      // Correct implementation depends on exact schema, but for 'strokes' array of objects:
+      // We find the doc and utilize array filters or pull/push logic. 
+      // Simpler for array of objects with id:
+
+      await RoomModel.updateOne(
+        { roomId, "strokes.id": shape.id },
+        { $set: { "strokes.$": shape } }
+      );
+    } catch (err) {
+      console.error('Error updating shape for', roomId, err);
+    }
+  });
+
+  socket.on('shape:delete', async (payload: { roomId: string; shapeId: string }) => {
+    const { roomId, shapeId } = payload;
+    socket.to(roomId).emit('shape:delete', shapeId);
+
+    try {
+      await RoomModel.updateOne(
+        { roomId },
+        { $pull: { strokes: { id: shapeId } } }
+      );
+    } catch (err) {
+      console.error('Error deleting shape from', roomId, err);
+    }
   });
 
   socket.on('board:clear', (payload: { roomId: string }) => {
@@ -64,17 +119,37 @@ io.on('connection', (socket) => {
     console.log('board:snapshot from', socket.id, 'room', roomId);
     socket.to(roomId).emit('board:snapshot', strokes);
 
-     RoomModel.findOneAndUpdate(
-       { roomId },
-       { $set: { strokes } },
-       { upsert: true }
-     ).catch((err) => {
-       console.error('Error saving room snapshot for', roomId, err);
-     });
+    RoomModel.findOneAndUpdate(
+      { roomId },
+      { $set: { strokes } },
+      { upsert: true }
+    ).catch((err) => {
+      console.error('Error saving room snapshot for', roomId, err);
+    });
+  });
+
+  socket.on('cursor:move', (payload: { roomId: string; x: number; y: number }) => {
+    const { roomId, x, y } = payload;
+    const user = users.get(socket.id);
+    if (user && user.roomId === roomId) {
+      socket.to(roomId).emit('cursor:move', {
+        socketId: socket.id,
+        x,
+        y,
+        nickname: user.nickname,
+        color: user.color
+      });
+    }
   });
 
   socket.on('disconnect', () => {
     console.log('Client disconnected:', socket.id);
+    const user = users.get(socket.id);
+    if (user) {
+      const { roomId } = user;
+      socket.to(roomId).emit('user:left', { socketId: socket.id });
+      users.delete(socket.id);
+    }
   });
 });
 

@@ -1,19 +1,24 @@
 import { useEffect, useState } from 'react'
 import './App.css'
 import { io } from 'socket.io-client'
-import { BrowserRouter, Routes, Route, useNavigate, useParams } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, useNavigate, useParams, useLocation } from 'react-router-dom'
 import CanvasBoard from './CanvasBoard'
 
 const socket = io('http://localhost:4000')
 
 function RoomPage() {
   const { roomId } = useParams()
+  const location = useLocation()
+  const nickname = location.state?.nickname || 'Guest'
 
   return (
     <div className="app-root">
       <h1>SyncBoard</h1>
-      <p style={{ marginBottom: '0.75rem', color: '#9ca3af' }}>Room: {roomId}</p>
-      <CanvasBoard socket={socket} roomId={roomId || 'default-room'} />
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem', width: '100%', maxWidth: '1000px' }}>
+         <p style={{ color: '#9ca3af', margin: 0 }}>Room: {roomId}</p>
+         <p style={{ color: '#9ca3af', margin: 0 }}>Playing as: <strong style={{ color: '#e5e7eb' }}>{nickname}</strong></p>
+      </div>
+      <CanvasBoard socket={socket} roomId={roomId || 'default-room'} nickname={nickname} />
     </div>
   )
 }
@@ -21,17 +26,27 @@ function RoomPage() {
 function HomePage() {
   const navigate = useNavigate()
   const [joinId, setJoinId] = useState('')
+  const [nickname, setNickname] = useState(localStorage.getItem('syncboard_nickname') || '')
 
-  const createRoom = () => {
+  const handleCreate = () => {
+    if (!nickname.trim()) {
+      alert('Please enter a nickname')
+      return
+    }
+    localStorage.setItem('syncboard_nickname', nickname)
     const id = crypto.randomUUID().slice(0, 8)
-    navigate(`/room/${id}`)
+    navigate(`/room/${id}`, { state: { nickname } })
   }
 
   const handleJoin = (e) => {
     e.preventDefault()
     const trimmed = joinId.trim()
-    if (!trimmed) return
-    navigate(`/room/${trimmed}`)
+    if (!trimmed || !nickname.trim()) {
+       if (!nickname.trim()) alert('Please enter a nickname')
+       return
+    }
+    localStorage.setItem('syncboard_nickname', nickname)
+    navigate(`/room/${trimmed}`, { state: { nickname } })
   }
 
   return (
@@ -42,9 +57,31 @@ function HomePage() {
       </p>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', maxWidth: 420, width: '100%' }}>
+        
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', width: '100%' }}>
+            <label style={{ fontSize: '0.875rem', color: '#9ca3af', marginLeft: '0.5rem' }}>Your Nickname</label>
+            <input 
+                type="text" 
+                placeholder="e.g. Picasso"
+                value={nickname}
+                onChange={e => setNickname(e.target.value)}
+                style={{
+                  padding: '0.75rem 1rem',
+                  borderRadius: '999px',
+                  border: '1px solid #4b5563',
+                  backgroundColor: '#020617',
+                  color: '#e5e7eb',
+                  width: '100%',
+                  boxSizing: 'border-box'
+                }}
+            />
+        </div>
+
+        <div style={{ height: '1px', backgroundColor: '#374151', margin: '0.5rem 0' }} />
+
         <button
           type="button"
-          onClick={createRoom}
+          onClick={handleCreate}
           style={{
             padding: '0.75rem 1rem',
             borderRadius: '999px',
