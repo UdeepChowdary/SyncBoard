@@ -10,14 +10,13 @@ services:
       - key: MONGO_URI
         sync: false # You will need to enter this value in the Render Dashboard
       - key: CLIENT_URL
-        fromService:
-          type: static
+        fromStaticSite:
           name: syncboard-client
           property: url
 
+staticSites:
   # Frontend: React Static Site
-  - type: static
-    name: syncboard-client
+  - name: syncboard-client
     root: client
     buildCommand: npm install && npm run build
     publishDir: dist
