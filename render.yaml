@@ -2,24 +2,26 @@ services:
   # Backend: Node.js Server
   - type: web
     name: syncboard-server
-    runtime: node
-    root: server
+    env: node
+    rootDir: server
     buildCommand: npm install && npm run build
     startCommand: npm start
     envVars:
       - key: MONGO_URI
-        sync: false # You will need to enter this value in the Render Dashboard
+        sync: false
       - key: CLIENT_URL
-        fromStaticSite:
+        fromService:
+          type: web
           name: syncboard-client
           property: url
 
-staticSites:
-  # Frontend: React Static Site
-  - name: syncboard-client
-    root: client
+  # Frontend: Static Site (configured as Web Service with static env)
+  - type: web
+    name: syncboard-client
+    env: static
+    rootDir: client
     buildCommand: npm install && npm run build
-    publishDir: dist
+    staticPublishPath: dist
     routes:
       - type: rewrite
         source: /**
