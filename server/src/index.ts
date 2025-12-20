@@ -36,6 +36,16 @@ const getRandomColor = () => {
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
 
+  const getRoomUsers = (roomId: string) => {
+    const roomUsers: { socketId: string; nickname: string; color: string }[] = [];
+    for (const [socketId, user] of users.entries()) {
+      if (user.roomId === roomId) {
+        roomUsers.push({ socketId, nickname: user.nickname, color: user.color });
+      }
+    }
+    return roomUsers;
+  };
+
   socket.on('join_room', async (roomId: string, nickname: string = 'Guest') => {
     console.log(`Socket ${socket.id} joining room`, roomId, 'as', nickname);
     socket.join(roomId);
@@ -45,6 +55,9 @@ io.on('connection', (socket) => {
       nickname,
       color: getRandomColor()
     });
+
+    // Broadcast updated user list to everyone in the room (including self)
+    io.to(roomId).emit('room:users', getRoomUsers(roomId));
 
     try {
       let room = await RoomModel.findOne({ roomId }).lean();
@@ -108,10 +121,19 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('board:clear', (payload: { roomId: string }) => {
+  socket.on('board:clear', async (payload: { roomId: string }) => {
     const { roomId } = payload;
     console.log('board:clear from', socket.id, 'room', roomId);
     socket.to(roomId).emit('board:clear');
+
+    try {
+      await RoomModel.updateOne(
+        { roomId },
+        { $set: { strokes: [] } }
+      );
+    } catch (err) {
+      console.error('Error clearing room for', roomId, err);
+    }
   });
 
   socket.on('board:snapshot', (payload: { roomId: string; strokes: unknown }) => {
@@ -147,8 +169,11 @@ io.on('connection', (socket) => {
     const user = users.get(socket.id);
     if (user) {
       const { roomId } = user;
+      users.delete(socket.id); // Delete first to update list correctly
       socket.to(roomId).emit('user:left', { socketId: socket.id });
-      users.delete(socket.id);
+
+      // Emit updated user list to remaining users
+      io.to(roomId).emit('room:users', getRoomUsers(roomId));
     }
   });
 });

@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
-import { Stage, Layer, Line, Rect, Circle, Group, Text, Transformer } from 'react-konva'
+import { Stage, Layer, Line, Rect, Circle, Arrow, Image as KonvaImage, Group, Text, Transformer } from 'react-konva'
+import useImage from 'use-image'
+
+const URLImage = ({ src, ...props }) => {
+  const [img] = useImage(src)
+  return <KonvaImage image={img} {...props} />
+}
 
 function RemoteCursor({ x, y, nickname, color }) {
   return (
@@ -27,11 +33,18 @@ function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
   const [isDrawing, setIsDrawing] = useState(false)
   const [color, setColor] = useState('#ffffff')
   const [strokeWidth, setStrokeWidth] = useState(3)
-  const [tool, setTool] = useState('pen') // 'select' | 'pen' | 'rect' | 'circle' | 'eraser'
+  const [tool, setTool] = useState('pen') // 'select' | 'pen' | 'rect' | 'circle' | 'eraser' | 'text' | 'arrow' | 'image'
   const [selectedId, setSelectedId] = useState(null) // ID of the selected shape
+
+  // Text Editing State
+  const [textEditVisible, setTextEditVisible] = useState(false)
+  const [textEditPos, setTextEditPos] = useState({ x: 0, y: 0 })
+  const [textEditValue, setTextEditValue] = useState('')
+  const [editingId, setEditingId] = useState(null)
 
   // Remote cursors state: { [socketId]: { x, y, nickname, color } }
   const [remoteUsers, setRemoteUsers] = useState({})
+  const [connectedUsers, setConnectedUsers] = useState([])
 
   useEffect(() => {
     if (!socket) return
@@ -84,6 +97,10 @@ function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
       })
     }
 
+    const handleRoomUsers = (users) => {
+      setConnectedUsers(users)
+    }
+
     socket.on('stroke:created', handleRemoteStroke)
     socket.on('shape:update', handleRemoteUpdate)
     socket.on('shape:delete', handleRemoteDelete)
@@ -91,6 +108,7 @@ function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
     socket.on('board:snapshot', handleRemoteSnapshot)
     socket.on('cursor:move', handleCursorMove)
     socket.on('user:left', handleUserLeft)
+    socket.on('room:users', handleRoomUsers)
 
     return () => {
       console.log('[CanvasBoard] cleanup listeners for room', roomId)
@@ -101,12 +119,16 @@ function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
       socket.off('board:snapshot', handleRemoteSnapshot)
       socket.off('cursor:move', handleCursorMove)
       socket.off('user:left', handleUserLeft)
+      socket.off('room:users', handleRoomUsers)
     }
   }, [socket, roomId, nickname])
 
   // Keydown listener for Deletion
   useEffect(() => {
     const handleKeyDown = (e) => {
+      // If editing text, ignore deletion
+      if (textEditVisible) return
+
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedId) {
         // Delete selected shape
         const shapeToDelete = strokes.find(s => s.id === selectedId)
@@ -121,10 +143,60 @@ function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [selectedId, strokes, socket, roomId])
+  }, [selectedId, strokes, socket, roomId, textEditVisible])
 
+
+  const handleTextDblClick = (e) => {
+    const stage = e.target.getStage()
+
+    // Check if clicked on a text node
+    if (e.target.className === 'Text') {
+      const node = e.target
+      const absPos = node.getAbsolutePosition()
+      const stageBox = stage.container().getBoundingClientRect()
+
+      // We need position relative to the container
+      // Konva absolute position is relative to layer, which matches container if no stage scroll
+      // But we need to account for stage DOM position if we fixed position the textarea?
+      // Let's assume relative positioning inside the container div.
+
+      setEditingId(node.id())
+      setTextEditValue(node.text())
+      setTextEditPos({ x: absPos.x, y: absPos.y })
+      setTextEditVisible(true)
+      setSelectedId(null) // Clear selection to hide transformer handles
+    }
+  }
+
+  const handleTextEditComplete = () => {
+    setTextEditVisible(false)
+    if (!editingId) return
+
+    const updatedText = textEditValue
+
+    const shape = strokes.find(s => s.id === editingId)
+    if (!shape) return
+
+    // Don't update if nothing changed
+    if (shape.text === updatedText) {
+      setEditingId(null)
+      return
+    }
+
+    const updatedShape = { ...shape, text: updatedText }
+
+    setStrokes(prev => prev.map(s => s.id === editingId ? updatedShape : s))
+    setEditingId(null)
+
+    if (socket) {
+      socket.emit('shape:update', { roomId, shape: updatedShape })
+    }
+  }
 
   const handleMouseDown = (e) => {
+    // If editing text, strict return to let blur handle it
+    if (textEditVisible) return
+
     // If we are in select mode
     if (tool === 'select') {
       // Check if we clicked on a transformer
@@ -144,6 +216,33 @@ function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
       } else {
         setSelectedId(null)
       }
+      return
+    }
+
+    // If Tool is Text
+    if (tool === 'text') {
+      const stage = stageRef.current
+      const point = stage.getPointerPosition()
+
+      const newShape = {
+        id: crypto.randomUUID(),
+        tool: 'text',
+        text: 'Double click to edit',
+        x: point.x,
+        y: point.y,
+        fontSize: 20,
+        color: color
+      }
+
+      setStrokes(prev => [...prev, newShape])
+
+      if (socket) {
+        socket.emit('stroke:created', { roomId, stroke: newShape })
+      }
+
+      // Switch back to select for better UX
+      setTool('select')
+      setSelectedId(newShape.id)
       return
     }
 
@@ -188,6 +287,11 @@ function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
         y: pointerPosition.y,
         radius: 0,
       }
+    } else if (tool === 'arrow') {
+      newShape = {
+        ...newShape,
+        points: [pointerPosition.x, pointerPosition.y, pointerPosition.x, pointerPosition.y],
+      }
     }
 
     setStrokes((prev) => [...prev, newShape])
@@ -205,6 +309,7 @@ function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
 
     if (!isDrawing) return
     if (tool === 'select') return // Do nothing for drawing if selecting
+    if (tool === 'text') return
 
     setStrokes((prev) => {
       const strokesCopy = [...prev]
@@ -220,14 +325,61 @@ function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
         const dx = point.x - lastStroke.x
         const dy = point.y - lastStroke.y
         lastStroke.radius = Math.sqrt(dx * dx + dy * dy)
+      } else if (lastStroke.tool === 'arrow') {
+        const points = lastStroke.points
+        // Update the last two points (end of arrow)
+        points[2] = point.x
+        points[3] = point.y
+        lastStroke.points = [...points]
       }
 
       return strokesCopy
     })
   }
 
+  const handleImageUpload = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (evt) => {
+        const dataUrl = evt.target.result;
+        const stage = stageRef.current;
+        const point = stage ? stage.getPointerPosition() || { x: width / 2, y: height / 2 } : { x: width / 2, y: height / 2 };
+
+        const newShape = {
+          id: crypto.randomUUID(),
+          tool: 'image',
+          x: point.x,
+          y: point.y,
+          image: dataUrl,
+        }
+
+        setStrokes(prev => [...prev, newShape])
+
+        if (socket) {
+          socket.emit('stroke:created', { roomId, stroke: newShape })
+        }
+
+        // Reset tool to select after upload
+        setTool('select')
+        setSelectedId(newShape.id)
+      };
+      reader.readAsDataURL(file);
+    }
+  }
+
+  const fileInputRef = useRef(null)
+
+  useEffect(() => {
+    if (tool === 'image' && fileInputRef.current) {
+      fileInputRef.current.click()
+    }
+  }, [tool])
+
+
   const handleMouseUp = () => {
     if (tool === 'select') return
+    if (tool === 'text') return
 
     setIsDrawing(false)
 
@@ -288,6 +440,19 @@ function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
       updatedShape.height = node.height() * scaleY
     } else if (shape.tool === 'circle') {
       updatedShape.radius = node.radius() * Math.max(Math.abs(scaleX), Math.abs(scaleY))
+    } else if (shape.tool === 'text') {
+      // For text, we usually just update scale, but we can also update fontSize
+      // But simpler to just update scaleX/scaleY
+      node.scaleX(scaleX)
+      node.scaleY(scaleY)
+      updatedShape = {
+        ...shape,
+        x: node.x(),
+        y: node.y(),
+        rotation: node.rotation(),
+        scaleX: scaleX,
+        scaleY: scaleY
+      }
     } else {
       node.scaleX(scaleX)
       node.scaleY(scaleY)
@@ -384,128 +549,82 @@ function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
   }
 
   return (
-    <div className="canvas-container">
-      <div className="toolbar" style={{ display: 'flex', gap: '1rem', marginBottom: '0.75rem', alignItems: 'center', justifyContent: 'space-between' }}>
-        <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
-          <div style={{ display: 'flex', gap: '0.5rem' }}>
+    <div className="relative flex flex-col h-full bg-gray-900">
 
-            <button
-              type="button"
-              onClick={() => { setTool('select'); setSelectedId(null); }}
-              style={{
-                padding: '0.35rem 0.75rem',
-                borderRadius: '999px',
-                border: tool === 'select' ? '1px solid #d1d5db' : '1px solid #4b5563',
-                backgroundColor: tool === 'select' ? '#111827' : '#020617',
-                color: '#e5e7eb',
-                cursor: 'pointer',
-                fontSize: 12,
-              }}
-            >
-              Select
-            </button>
+      {/* Connected Users List - Floating Top Right */}
+      <div className="absolute top-4 right-4 bg-gray-800 p-4 rounded-xl border border-gray-700 z-50 min-w-[200px] shadow-xl">
+        <h3 className="mb-3 text-sm font-semibold text-gray-200 border-b border-gray-700 pb-2">
+          Users ({connectedUsers.length})
+        </h3>
+        <div className="flex flex-col gap-2 max-h-[200px] overflow-y-auto custom-scrollbar">
+          {connectedUsers.map(user => (
+            <div key={user.socketId} className="flex items-center gap-2 text-sm text-gray-300">
+              <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: user.color }}></div>
+              <span className="truncate">{user.nickname} {user.socketId === socket?.id ? '(You)' : ''}</span>
+            </div>
+          ))}
+        </div>
+      </div>
 
-            <button
-              type="button"
-              onClick={() => { setTool('pen'); setSelectedId(null); }}
-              style={{
-                padding: '0.35rem 0.75rem',
-                borderRadius: '999px',
-                border: tool === 'pen' ? '1px solid #d1d5db' : '1px solid #4b5563',
-                backgroundColor: tool === 'pen' ? '#111827' : '#020617',
-                color: '#e5e7eb',
-                cursor: 'pointer',
-                fontSize: 12,
-              }}
-            >
-              Pen
-            </button>
-
-            <button
-              type="button"
-              onClick={() => { setTool('rect'); setSelectedId(null); }}
-              style={{
-                padding: '0.35rem 0.75rem',
-                borderRadius: '999px',
-                border: tool === 'rect' ? '1px solid #d1d5db' : '1px solid #4b5563',
-                backgroundColor: tool === 'rect' ? '#111827' : '#020617',
-                color: '#e5e7eb',
-                cursor: 'pointer',
-                fontSize: 12,
-              }}
-            >
-              Rect
-            </button>
-
-            <button
-              type="button"
-              onClick={() => { setTool('circle'); setSelectedId(null); }}
-              style={{
-                padding: '0.35rem 0.75rem',
-                borderRadius: '999px',
-                border: tool === 'circle' ? '1px solid #d1d5db' : '1px solid #4b5563',
-                backgroundColor: tool === 'circle' ? '#111827' : '#020617',
-                color: '#e5e7eb',
-                cursor: 'pointer',
-                fontSize: 12,
-              }}
-            >
-              Circle
-            </button>
-
-            <button
-              type="button"
-              onClick={() => { setTool('eraser'); setSelectedId(null); }}
-              style={{
-                padding: '0.35rem 0.75rem',
-                borderRadius: '999px',
-                border: tool === 'eraser' ? '1px solid #d1d5db' : '1px solid #4b5563',
-                backgroundColor: tool === 'eraser' ? '#111827' : '#020617',
-                color: '#e5e7eb',
-                cursor: 'pointer',
-                fontSize: 12,
-              }}
-            >
-              Eraser
-            </button>
+      <div className="flex items-center justify-between gap-4 mb-3 p-2 bg-gray-800 rounded-xl border border-gray-700 shadow-lg mx-4 z-40">
+        <div className="flex items-center gap-4">
+          <div className="flex gap-2 bg-gray-900 p-1.5 rounded-lg border border-gray-700">
+            {/* Hidden file input for current image tool */}
+            <input
+              type="file"
+              accept="image/*"
+              ref={fileInputRef}
+              style={{ display: 'none' }}
+              onChange={handleImageUpload}
+            />
+            {['select', 'text', 'pen', 'rect', 'circle', 'arrow', 'image', 'eraser'].map((t) => (
+              <button
+                key={t}
+                type="button"
+                onClick={() => { setTool(t); setSelectedId(null); }}
+                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${tool === t
+                  ? 'bg-blue-600 text-white shadow-sm'
+                  : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800'
+                  }`}
+              >
+                {t.charAt(0).toUpperCase() + t.slice(1)}
+              </button>
+            ))}
           </div>
 
-          <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: '#e5e7eb' }}>
+          <div className="h-6 w-px bg-gray-700"></div>
+
+          <label className="flex items-center gap-2 text-xs font-medium text-gray-400">
             Color
-            <input
-              type="color"
-              value={color}
-              onChange={(e) => setColor(e.target.value)}
-              style={{ width: 32, height: 32, padding: 0, border: 'none', background: 'transparent' }}
-            />
+            <div className="relative w-8 h-8 rounded-full overflow-hidden border border-gray-600 ring-2 ring-gray-800 transition-transform hover:scale-105">
+              <input
+                type="color"
+                value={color}
+                onChange={(e) => setColor(e.target.value)}
+                className="absolute -top-1/2 -left-1/2 w-[200%] h-[200%] p-0 border-none cursor-pointer"
+              />
+            </div>
           </label>
 
-          <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: '#e5e7eb' }}>
-            Thickness
+          <label className="flex items-center gap-2 text-xs font-medium text-gray-400">
+            Width
             <input
               type="range"
               min="1"
               max="20"
               value={strokeWidth}
               onChange={(e) => setStrokeWidth(Number(e.target.value))}
+              className="w-24 h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
             />
-            <span style={{ minWidth: 24, textAlign: 'right' }}>{strokeWidth}</span>
+            <span className="w-6 text-right text-gray-200 font-mono">{strokeWidth}</span>
           </label>
         </div>
 
-        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+        <div className="flex items-center gap-3">
           <button
             type="button"
             onClick={handleClear}
-            style={{
-              padding: '0.35rem 0.9rem',
-              borderRadius: '999px',
-              border: '1px solid #4b5563',
-              backgroundColor: '#111827',
-              color: '#e5e7eb',
-              cursor: 'pointer',
-              fontSize: 12,
-            }}
+            className="px-4 py-1.5 rounded-lg border border-red-900/50 bg-red-900/20 text-red-400 text-xs font-medium hover:bg-red-900/40 transition-colors"
           >
             Clear
           </button>
@@ -513,33 +632,20 @@ function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
           <button
             type="button"
             onClick={handleExport}
-            style={{
-              padding: '0.35rem 0.9rem',
-              borderRadius: '999px',
-              border: '1px solid #4b5563',
-              backgroundColor: '#111827',
-              color: '#e5e7eb',
-              cursor: 'pointer',
-              fontSize: 12,
-            }}
+            className="px-4 py-1.5 rounded-lg border border-gray-600 bg-gray-800 text-gray-300 text-xs font-medium hover:bg-gray-700 transition-colors"
           >
-            Export PNG
+            Export
           </button>
 
-          <div style={{ display: 'flex', gap: '0.5rem', marginLeft: '0.5rem' }}>
+          <div className="flex gap-2 pl-3 border-l border-gray-700">
             <button
               type="button"
               onClick={handleUndo}
               disabled={!canUndo}
-              style={{
-                padding: '0.35rem 0.75rem',
-                borderRadius: '999px',
-                border: '1px solid #4b5563',
-                backgroundColor: canUndo ? '#111827' : '#020617',
-                color: canUndo ? '#e5e7eb' : '#6b7280',
-                cursor: canUndo ? 'pointer' : 'not-allowed',
-                fontSize: 12,
-              }}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${canUndo
+                ? 'border-gray-600 bg-gray-800 text-gray-300 hover:bg-gray-700'
+                : 'border-gray-800 bg-gray-900 text-gray-600 cursor-not-allowed'
+                }`}
             >
               Undo
             </button>
@@ -548,15 +654,10 @@ function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
               type="button"
               onClick={handleRedo}
               disabled={!canRedo}
-              style={{
-                padding: '0.35rem 0.75rem',
-                borderRadius: '999px',
-                border: '1px solid #4b5563',
-                backgroundColor: canRedo ? '#111827' : '#020617',
-                color: canRedo ? '#e5e7eb' : '#6b7280',
-                cursor: canRedo ? 'pointer' : 'not-allowed',
-                fontSize: 12,
-              }}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${canRedo
+                ? 'border-gray-600 bg-gray-800 text-gray-300 hover:bg-gray-700'
+                : 'border-gray-800 bg-gray-900 text-gray-600 cursor-not-allowed'
+                }`}
             >
               Redo
             </button>
@@ -564,95 +665,158 @@ function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
         </div>
       </div>
 
-      <Stage
-        ref={stageRef}
-        width={width}
-        height={height - 120}
-        onMouseDown={handleMouseDown}
-        onMousemove={handleMouseMove}
-        onMouseup={handleMouseUp}
-        style={{ backgroundColor: '#111827', borderRadius: '0.75rem' }}
-      >
-        <Layer>
-          {strokes.map((shape) => {
-            const isSelected = shape.id === selectedId
-            const commonProps = {
-              key: shape.id,
-              id: shape.id,
-              draggable: tool === 'select',
-              onDragEnd: handleDragEnd,
-              onTransformEnd: handleTransformEnd,
-              opacity: 1,
-              // Apply transforms if they exist
-              x: shape.x || 0,
-              y: shape.y || 0,
-              rotation: shape.rotation || 0,
-              scaleX: shape.scaleX || 1,
-              scaleY: shape.scaleY || 1,
-            }
+      <div className="relative flex-1 bg-gray-950 overflow-hidden m-4 mt-0 rounded-2xl border border-gray-800 shadow-2xl">
+        {/* Text Area Overlay for Editing */}
+        {textEditVisible && (
+          <textarea
+            value={textEditValue}
+            onChange={(e) => setTextEditValue(e.target.value)}
+            onBlur={handleTextEditComplete}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                handleTextEditComplete();
+              }
+            }}
+            style={{
+              position: 'absolute',
+              top: textEditPos.y,
+              left: textEditPos.x,
+              width: Math.max(100, textEditValue.length * 10) + 'px',
+              height: 'auto'
+            }}
+            className="text-xl p-0 m-0 overflow-hidden bg-transparent outline-none resize-none z-50 font-sans leading-none border border-blue-500 rounded text-blue-400"
+            autoFocus
+          />
+        )}
 
-            if (shape.tool === 'pen') {
+        <Stage
+          ref={stageRef}
+          width={width}
+          height={height - 140}
+          onMouseDown={handleMouseDown}
+          onMousemove={handleMouseMove}
+          onMouseup={handleMouseUp}
+          onDblClick={handleTextDblClick}
+          className="cursor-crosshair"
+        >
+          <Layer>
+            {strokes.map((shape) => {
+              const isSelected = shape.id === selectedId
+              const commonProps = {
+                key: shape.id,
+                id: shape.id,
+                draggable: tool === 'select',
+                onDragEnd: handleDragEnd,
+                onTransformEnd: handleTransformEnd,
+                opacity: 1,
+                // Apply transforms if they exist
+                x: shape.x || 0,
+                y: shape.y || 0,
+                rotation: shape.rotation || 0,
+                scaleX: shape.scaleX || 1,
+                scaleY: shape.scaleY || 1,
+              }
+
+              if (shape.tool === 'pen') {
+                return (
+                  <Line
+                    {...commonProps}
+                    points={shape.points}
+                    stroke={shape.color}
+                    strokeWidth={shape.strokeWidth}
+                    hitStrokeWidth={25}
+                    tension={0.5}
+                    lineCap="round"
+                    lineJoin="round"
+                  />
+                )
+              }
+
+              if (shape.tool === 'rect') {
+                return (
+                  <Rect
+                    {...commonProps}
+                    width={shape.width}
+                    height={shape.height}
+                    stroke={shape.color}
+                    strokeWidth={shape.strokeWidth}
+                  />
+                )
+              }
+
+              if (shape.tool === 'circle') {
+                return (
+                  <Circle
+                    {...commonProps}
+                    radius={shape.radius}
+                    stroke={shape.color}
+                    strokeWidth={shape.strokeWidth}
+                  />
+                )
+              }
+
+              if (shape.tool === 'text') {
+                // Hide text if it is being edited to avoid duplication
+                if (shape.id === editingId) return null;
+
+                return (
+                  <Text
+                    {...commonProps}
+                    text={shape.text}
+                    fontSize={shape.fontSize || 20}
+                    fill={shape.color}
+                    fontFamily="sans-serif"
+                  />
+                )
+              }
+
+              if (shape.tool === 'arrow') {
+                return (
+                  <Arrow
+                    {...commonProps}
+                    points={shape.points}
+                    stroke={shape.color}
+                    strokeWidth={shape.strokeWidth}
+                    fill={shape.color}
+                  />
+                )
+              }
+
+              if (shape.tool === 'image') {
+                return (
+                  <URLImage
+                    {...commonProps}
+                    src={shape.image}
+                  />
+                )
+              }
+
+              return null
+            })}
+
+            {/* Transformer */}
+            <TransformerComponent selectedShape={strokes.find(s => s.id === selectedId)} />
+
+          </Layer>
+
+          {/* Remote Cursors Layer */}
+          <Layer>
+            {Object.keys(remoteUsers).map(socketId => {
+              const user = remoteUsers[socketId]
               return (
-                <Line
-                  {...commonProps}
-                  points={shape.points}
-                  stroke={shape.color}
-                  strokeWidth={shape.strokeWidth}
-                  hitStrokeWidth={25}
-                  tension={0.5}
-                  lineCap="round"
-                  lineJoin="round"
+                <RemoteCursor
+                  key={socketId}
+                  x={user.x}
+                  y={user.y}
+                  nickname={user.nickname}
+                  color={user.color}
                 />
               )
-            }
-
-            if (shape.tool === 'rect') {
-              return (
-                <Rect
-                  {...commonProps}
-                  width={shape.width}
-                  height={shape.height}
-                  stroke={shape.color}
-                  strokeWidth={shape.strokeWidth}
-                />
-              )
-            }
-
-            if (shape.tool === 'circle') {
-              return (
-                <Circle
-                  {...commonProps}
-                  radius={shape.radius}
-                  stroke={shape.color}
-                  strokeWidth={shape.strokeWidth}
-                />
-              )
-            }
-
-            return null
-          })}
-
-          {/* Transformer */}
-          <TransformerComponent selectedShape={strokes.find(s => s.id === selectedId)} />
-
-        </Layer>
-
-        {/* Remote Cursors Layer */}
-        <Layer>
-          {Object.keys(remoteUsers).map(socketId => {
-            const user = remoteUsers[socketId]
-            return (
-              <RemoteCursor
-                key={socketId}
-                x={user.x}
-                y={user.y}
-                nickname={user.nickname}
-                color={user.color}
-              />
-            )
-          })}
-        </Layer>
-      </Stage>
+            })}
+          </Layer>
+        </Stage>
+      </div>
     </div>
   )
 }
