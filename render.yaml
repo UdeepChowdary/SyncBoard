@@ -13,7 +13,7 @@ services:
         fromService:
           type: web
           name: syncboard-client
-          property: url
+          property: host
 
   # Frontend: Static Site (configured as Web Service with static env)
   - type: web
@@ -31,4 +31,4 @@ services:
         fromService:
           type: web
           name: syncboard-server
-          property: url
+          property: host

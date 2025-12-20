@@ -4,7 +4,9 @@ import { io } from 'socket.io-client'
 import { BrowserRouter, Routes, Route, useNavigate, useParams, useLocation } from 'react-router-dom'
 import CanvasBoard from './CanvasBoard'
 
-const SOCKET_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:4000'
+const SOCKET_URL = import.meta.env.VITE_SERVER_URL?.startsWith('http')
+  ? import.meta.env.VITE_SERVER_URL
+  : `https://${import.meta.env.VITE_SERVER_URL || 'localhost:4000'}`
 const socket = io(SOCKET_URL)
 
 function RoomPage() {
@@ -130,30 +132,28 @@ function HomePage() {
 
 function App() {
   useEffect(() => {
-    useEffect(() => {
+    socket.on('connect', () => {
+      console.log('Connected to server with id:', socket.id)
+    })
 
-      socket.on('connect', () => {
-        console.log('Connected to server with id:', socket.id)
-      })
+    socket.on('disconnect', () => {
+      console.log('Disconnected from server')
+    })
 
-      socket.on('disconnect', () => {
-        console.log('Disconnected from server')
-      })
+    return () => {
+      socket.off('connect')
+      socket.off('disconnect')
+    }
+  }, [])
 
-      return () => {
-        socket.off('connect')
-        socket.off('disconnect')
-      }
-    }, [])
-
-    return (
-      <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<HomePage />} />
-          <Route path="/room/:roomId" element={<RoomPage />} />
-        </Routes>
-      </BrowserRouter>
-    )
-  }
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<HomePage />} />
+        <Route path="/room/:roomId" element={<RoomPage />} />
+      </Routes>
+    </BrowserRouter>
+  )
+}
 
 export default App
