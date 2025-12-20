@@ -49,7 +49,7 @@ function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
   useEffect(() => {
     if (!socket) return
 
-    console.log('[CanvasBoard] joining room', roomId, 'with socket', socket.id)
+    if (!socket) return
     socket.emit('join_room', roomId, nickname)
 
     const handleRemoteStroke = (stroke) => {
@@ -75,7 +75,6 @@ function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
     }
 
     const handleRemoteSnapshot = (remoteStrokes) => {
-      console.log('[CanvasBoard] received board:snapshot')
       setStrokes(remoteStrokes || [])
       setPast([])
       setFuture([])
@@ -111,7 +110,6 @@ function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
     socket.on('room:users', handleRoomUsers)
 
     return () => {
-      console.log('[CanvasBoard] cleanup listeners for room', roomId)
       socket.off('stroke:created', handleRemoteStroke)
       socket.off('shape:update', handleRemoteUpdate)
       socket.off('shape:delete', handleRemoteDelete)
@@ -389,7 +387,6 @@ function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
       const strokesCopy = [...prev]
       const lastStroke = strokesCopy[strokesCopy.length - 1]
       if (lastStroke) {
-        console.log('[CanvasBoard] emitting stroke:created', { roomId, lastStroke })
         socket.emit('stroke:created', { roomId, stroke: lastStroke })
       }
       return strokesCopy

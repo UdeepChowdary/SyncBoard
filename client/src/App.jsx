@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
-import './App.css'
+
 import { io } from 'socket.io-client'
 import { BrowserRouter, Routes, Route, useNavigate, useParams, useLocation } from 'react-router-dom'
 import CanvasBoard from './CanvasBoard'
 
-const socket = io('http://localhost:4000')
+const SOCKET_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:4000'
+const socket = io(SOCKET_URL)
 
 function RoomPage() {
   const { roomId } = useParams()
@@ -129,31 +130,30 @@ function HomePage() {
 
 function App() {
   useEffect(() => {
-    console.log('[App] useEffect mount, socket id:', socket.id)
+    useEffect(() => {
 
-    socket.on('connect', () => {
-      console.log('Connected to server with id:', socket.id)
-    })
+      socket.on('connect', () => {
+        console.log('Connected to server with id:', socket.id)
+      })
 
-    socket.on('disconnect', () => {
-      console.log('Disconnected from server')
-    })
+      socket.on('disconnect', () => {
+        console.log('Disconnected from server')
+      })
 
-    return () => {
-      console.log('[App] useEffect cleanup')
-      socket.off('connect')
-      socket.off('disconnect')
-    }
-  }, [])
+      return () => {
+        socket.off('connect')
+        socket.off('disconnect')
+      }
+    }, [])
 
-  return (
-    <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<HomePage />} />
-        <Route path="/room/:roomId" element={<RoomPage />} />
-      </Routes>
-    </BrowserRouter>
-  )
-}
+    return (
+      <BrowserRouter>
+        <Routes>
+          <Route path="/" element={<HomePage />} />
+          <Route path="/room/:roomId" element={<RoomPage />} />
+        </Routes>
+      </BrowserRouter>
+    )
+  }
 
 export default App
