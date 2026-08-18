@@ -32,4 +32,4 @@ const UsersSidebar = ({ connectedUsers, socketId }) => {
   );
 };
 
-export default UsersSidebar;
+export default React.memo(UsersSidebar);

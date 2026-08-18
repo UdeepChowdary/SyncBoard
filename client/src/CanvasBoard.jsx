@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
+import React, { useEffect, useRef, useState, useCallback } from 'react'
 import { Stage, Layer, Line, Rect, Circle, Arrow, Image as KonvaImage, Group, Text, Transformer } from 'react-konva'
 import useImage from 'use-image'
 import { jsPDF } from 'jspdf'
@@ -6,7 +6,7 @@ import Toolbar from './components/Toolbar'
 import UsersSidebar from './components/UsersSidebar'
 
 const URLImage = ({ src, ...props }) => {
-  const [img] = useImage(src)
+  const [img] = useImage(src, 'anonymous')
   return <KonvaImage image={img} {...props} />
 }
 
@@ -19,7 +19,7 @@ const getRelativePointerPosition = (stage) => {
   }
 }
 
-function RemoteCursor({ x, y, nickname, color }) {
+const RemoteCursor = React.memo(function RemoteCursor({ x, y, nickname, color }) {
   return (
     <Group x={x} y={y}>
       <Circle radius={6} fill={color} stroke="#fff" strokeWidth={1} />
@@ -35,7 +35,7 @@ function RemoteCursor({ x, y, nickname, color }) {
       />
     </Group>
   )
-}
+})
 
 function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
   const stageRef = useRef(null)
@@ -268,18 +268,19 @@ function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
 
   const handleTextDblClick = (e) => {
     const stage = e.target.getStage()
+    if (!stage) return
 
-    // Check if clicked on a text node
-    if (e.target.className === 'Text') {
-      const node = e.target
-      
-      // We need absolute position relative to the container DOM element for the textarea
-      // The absolute position on the stage gives position relative to the stage's top-left
-      // We must consider stage's scale and panning
-      const absPos = node.getAbsolutePosition()
+    const target = e.target
+    let shapeId = target.id()
+    if (!shapeId && target.getParent()?.className === 'Group') {
+      shapeId = target.getParent()?.id()
+    }
 
-      setEditingId(node.id())
-      setTextEditValue(node.text())
+    const shape = strokes.find(s => s.id === shapeId)
+    if (shape && (shape.tool === 'text' || shape.tool === 'sticky')) {
+      const absPos = target.getAbsolutePosition()
+      setEditingId(shape.id)
+      setTextEditValue(shape.text || '')
       setTextEditPos({ x: absPos.x, y: absPos.y })
       setTextEditVisible(true)
       setSelectedId(null) // Clear selection to hide transformer handles
@@ -338,7 +339,10 @@ function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
         setSelectedId(null)
         return
       }
-      const clickedId = e.target.id()
+      let clickedId = e.target.id()
+      if (!clickedId && e.target.getParent()?.className === 'Group') {
+        clickedId = e.target.getParent()?.id()
+      }
       if (clickedId) {
         setSelectedId(clickedId)
       } else {
@@ -1161,8 +1165,9 @@ function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
 
               if (shape.tool === 'sticky') {
                 return (
-                  <Group key={shape.id} {...commonProps}>
+                  <Group key={shape.id} {...commonProps} id={shape.id}>
                     <Rect
+                      id={shape.id}
                       width={shape.width}
                       height={shape.height}
                       fill={shape.fillColor}
@@ -1171,6 +1176,7 @@ function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
                       shadowOffset={{ x: 3, y: 3 }}
                     />
                     <Text
+                      id={shape.id}
                       text={shape.id === editingId ? '' : (shape.text || 'Sticky Note')}
                       width={shape.width - 20}
                       height={shape.height - 20}
@@ -1243,12 +1249,20 @@ function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
                 bh = r * 2;
               } else if (shape.tool === 'pen' || shape.tool === 'eraser' || shape.tool === 'arrow') {
                 if (shape.points && shape.points.length >= 2) {
-                  const xs = shape.points.filter((_, idx) => idx % 2 === 0);
-                  const ys = shape.points.filter((_, idx) => idx % 2 === 1);
-                  bx = Math.min(...xs);
-                  by = Math.min(...ys);
-                  bw = Math.max(...xs) - bx;
-                  bh = Math.max(...ys) - by;
+                  let minX = shape.points[0], maxX = shape.points[0];
+                  let minY = shape.points[1], maxY = shape.points[1];
+                  for (let idx = 0; idx < shape.points.length; idx += 2) {
+                    const px = shape.points[idx];
+                    const py = shape.points[idx + 1];
+                    if (px < minX) minX = px;
+                    if (px > maxX) maxX = px;
+                    if (py < minY) minY = py;
+                    if (py > maxY) maxY = py;
+                  }
+                  bx = minX;
+                  by = minY;
+                  bw = maxX - minX;
+                  bh = maxY - minY;
                 }
               }
 
