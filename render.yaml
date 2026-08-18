@@ -14,6 +14,11 @@ services:
           type: web
           name: syncboard-client
           property: host
+      - key: SERVER_PUBLIC_URL
+        fromService:
+          type: web
+          name: syncboard-server
+          property: host
 
   # Frontend: Static Site (configured as Web Service with static env)
   - type: web

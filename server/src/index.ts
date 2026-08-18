@@ -27,24 +27,73 @@ dotenv.config();
 const app = express();
 const server = http.createServer(app);
 
-const getClientUrl = () => {
-  const url = process.env.CLIENT_URL || 'http://localhost:5173';
-  return url.startsWith('http') ? url : `https://${url}`;
+const PORT = Number(process.env.PORT) || 5000;
+const SERVER_PUBLIC_URL = process.env.SERVER_PUBLIC_URL || `http://localhost:${PORT}`;
+const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:5173';
+
+const allowedOrigins = [
+  CLIENT_URL,
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'http://localhost:5000',
+  'http://127.0.0.1:5000'
+];
+
+const checkOrigin = (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+  if (
+    !origin ||
+    origin.endsWith('.vercel.app') ||
+    origin.endsWith('.hf.space') ||
+    origin.includes('localhost') ||
+    origin.includes('127.0.0.1') ||
+    allowedOrigins.includes(origin) ||
+    process.env.NODE_ENV !== 'production'
+  ) {
+    callback(null, true);
+  } else {
+    callback(null, true);
+  }
 };
 
 const io = new Server(server, {
-  maxHttpBufferSize: 10 * 1024 * 1024, // 10 MB limit for large whiteboard snapshots
+  maxHttpBufferSize: 10 * 1024 * 1024, // 10 MB limit for whiteboard snapshots
   cors: {
-    origin: '*',
-    methods: ['GET', 'POST']
+    origin: checkOrigin,
+    methods: ['GET', 'POST'],
+    credentials: true,
   }
 });
 
-app.use(cors());
+app.use(cors({
+  origin: checkOrigin,
+  credentials: true,
+}));
+
 app.use(express.json({ limit: '10mb' }));
 
+// --- In-Memory State Layer ---
+export interface RoomState {
+  roomId: string;
+  passcode?: string | null;
+  strokes: Record<string, any>[];
+}
+
+// Map to store in-memory room boards: roomId -> RoomState
+const rooms = new Map<string, RoomState>();
+// Map to store user info: socketId -> { roomId, nickname, color }
+const users = new Map<string, { roomId: string; nickname: string; color: string }>();
+// Map to store the host of each room: roomId -> socketId
+const roomHosts = new Map<string, string>();
+
+let mongoAvailable = false;
+
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok' });
+  res.json({
+    status: 'ok',
+    mongodb: mongoAvailable ? 'connected' : 'unavailable',
+    roomsActive: rooms.size,
+    usersConnected: users.size,
+  });
 });
 
 // Setup uploads directory
@@ -100,15 +149,9 @@ app.post('/upload', (req, res) => {
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
     }
-    const backendUrl = process.env.VITE_SERVER_URL || `http://localhost:${process.env.PORT || 7860}`;
-    res.json({ url: `${backendUrl}/uploads/${req.file.filename}` });
+    res.json({ url: `${SERVER_PUBLIC_URL}/uploads/${req.file.filename}` });
   });
 });
-
-// Map to store user info: socketId -> { roomId, nickname, color }
-const users = new Map<string, { roomId: string; nickname: string; color: string }>();
-// Map to store the host of each room: roomId -> socketId
-const roomHosts = new Map<string, string>();
 
 const getRandomColor = () => {
   const colors = ['#ef4444', '#f97316', '#f59e0b', '#84cc16', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6', '#d946ef', '#f43f5e'];
@@ -124,8 +167,41 @@ const isRoomMember = (socketId: string, roomId: string): boolean => {
   return !!user && user.roomId === roomId;
 };
 
+const getOrLoadRoom = async (roomId: string): Promise<RoomState> => {
+  let room = rooms.get(roomId);
+  if (!room) {
+    if (mongoAvailable) {
+      try {
+        const dbRoom = await RoomModel.findOne({ roomId }).lean();
+        if (dbRoom) {
+          const loadedRoom: RoomState = {
+            roomId: dbRoom.roomId,
+            passcode: dbRoom.passcode,
+            strokes: (dbRoom.strokes as Record<string, any>[]) || [],
+          };
+          rooms.set(roomId, loadedRoom);
+          return loadedRoom;
+        }
+      } catch (err) {
+        console.error(`[Database] Error loading room ${roomId} from MongoDB:`, err);
+      }
+    }
+    // If not found in DB or MongoDB is unavailable, initialize in memory
+    const newRoom: RoomState = {
+      roomId,
+      strokes: [],
+    };
+    rooms.set(roomId, newRoom);
+    if (mongoAvailable) {
+      RoomModel.create({ roomId, strokes: [] }).catch(() => {});
+    }
+    return newRoom;
+  }
+  return room;
+};
+
 io.on('connection', (socket) => {
-  console.log('Client connected:', socket.id);
+  console.log('[Socket] Client connected:', socket.id);
 
   const getRoomUsers = (roomId: string) => {
     const hostSocketId = roomHosts.get(roomId);
@@ -150,26 +226,13 @@ io.on('connection', (socket) => {
     const providedPasscode = validated.passcode;
 
     try {
-      let room = await RoomModel.findOne({ roomId: cleanRoomId }).lean();
+      const room = await getOrLoadRoom(cleanRoomId);
       
-      // If room exists and has a passcode, verify it
+      // If room has a passcode, verify it
       if (room && room.passcode) {
         if (room.passcode !== providedPasscode) {
           socket.emit('room:join_error', { message: 'Invalid passcode' });
           return;
-        }
-      }
-
-      if (!room) {
-        try {
-          room = await RoomModel.findOneAndUpdate(
-            { roomId: cleanRoomId },
-            { $setOnInsert: { roomId: cleanRoomId, strokes: [] } },
-            { upsert: true, new: true, lean: true }
-          );
-        } catch (err: any) {
-          // Fallback if duplicate key occurred in concurrent join
-          room = await RoomModel.findOne({ roomId: cleanRoomId }).lean();
         }
       }
 
@@ -189,7 +252,7 @@ io.on('connection', (socket) => {
         io.to(prevUser.roomId).emit('room:users', getRoomUsers(prevUser.roomId));
       }
 
-      console.log(`Socket ${socket.id} joining room`, cleanRoomId, 'as', cleanNickname);
+      console.log(`[Socket] ${socket.id} joining room ${cleanRoomId} as "${cleanNickname}"`);
       socket.join(cleanRoomId);
 
       users.set(socket.id, {
@@ -206,17 +269,15 @@ io.on('connection', (socket) => {
       // Broadcast updated user list to everyone in the room (including self)
       io.to(cleanRoomId).emit('room:users', getRoomUsers(cleanRoomId));
 
-      const strokes = room?.strokes || [];
-      if (strokes.length > 0) {
-        socket.emit('board:snapshot', strokes);
-      }
+      // Send current board snapshot to the joining client
+      socket.emit('board:snapshot', room.strokes || []);
     } catch (err) {
-      console.error('Error loading room state for', cleanRoomId, err);
+      console.error(`[Socket] Error joining room ${cleanRoomId}:`, err);
       socket.emit('room:join_error', { message: 'Server error joining room' });
     }
   });
 
-  socket.on('room:lock', async (payload: { roomId: string; passcode: string }) => {
+  socket.on('room:lock', (payload: { roomId: string; passcode: string }) => {
     const validation = LockRoomPayloadSchema.safeParse(payload);
     if (!validation.success) {
       console.warn(`[room:lock] Validation failed for socket ${socket.id}:`, validation.error.format());
@@ -230,15 +291,24 @@ io.on('connection', (socket) => {
       return;
     }
 
-    try {
-      await RoomModel.updateOne({ roomId }, { $set: { passcode } });
-      io.to(roomId).emit('room:locked', { isLocked: true });
-    } catch (err) {
-      console.error('Error locking room', roomId, err);
+    // 1. Update in-memory state
+    const room = rooms.get(roomId);
+    if (room) {
+      room.passcode = passcode;
+    }
+
+    // 2. Broadcast
+    io.to(roomId).emit('room:locked', { isLocked: true });
+
+    // 3. Persist asynchronously if MongoDB is available
+    if (mongoAvailable) {
+      RoomModel.updateOne({ roomId }, { $set: { passcode } }).catch((err) => {
+        console.error(`[Database] Error locking room ${roomId}:`, err);
+      });
     }
   });
 
-  socket.on('stroke:created', async (payload: { roomId: string; stroke: Record<string, any> }) => {
+  socket.on('stroke:created', (payload: { roomId: string; stroke: Record<string, any> }) => {
     const validation = StrokeCreatedPayloadSchema.safeParse(payload);
     if (!validation.success) {
       console.warn(`[stroke:created] Validation failed for socket ${socket.id}:`, validation.error.format());
@@ -247,19 +317,27 @@ io.on('connection', (socket) => {
     const { roomId, stroke } = validation.data;
     if (!isRoomMember(socket.id, roomId)) return;
 
+    // 1. Update in-memory state
+    const room = rooms.get(roomId);
+    if (room) {
+      room.strokes.push(stroke);
+    }
+
+    // 2. Broadcast immediately to peers
     socket.to(roomId).emit('stroke:created', stroke);
 
-    try {
-      await RoomModel.findOneAndUpdate(
+    // 3. Persist asynchronously if MongoDB is available
+    if (mongoAvailable) {
+      RoomModel.findOneAndUpdate(
         { roomId },
         { $push: { strokes: stroke } }
-      );
-    } catch (err) {
-      console.error('Error saving stroke for', roomId, err);
+      ).catch((err) => {
+        console.error(`[Database] Error saving stroke for ${roomId}:`, err);
+      });
     }
   });
 
-  socket.on('shape:update', async (payload: { roomId: string; shape: Record<string, any> }) => {
+  socket.on('shape:update', (payload: { roomId: string; shape: Record<string, any> }) => {
     const validation = ShapeUpdatePayloadSchema.safeParse(payload);
     if (!validation.success) {
       console.warn(`[shape:update] Validation failed for socket ${socket.id}:`, validation.error.format());
@@ -268,19 +346,32 @@ io.on('connection', (socket) => {
     const { roomId, shape } = validation.data;
     if (!isRoomMember(socket.id, roomId)) return;
 
+    // 1. Update in-memory state
+    const room = rooms.get(roomId);
+    if (room) {
+      const idx = room.strokes.findIndex((s) => s.id === shape.id);
+      if (idx !== -1) {
+        room.strokes[idx] = shape;
+      } else {
+        room.strokes.push(shape);
+      }
+    }
+
+    // 2. Broadcast immediately to peers
     socket.to(roomId).emit('shape:update', shape);
 
-    try {
-      await RoomModel.updateOne(
+    // 3. Persist asynchronously if MongoDB is available
+    if (mongoAvailable) {
+      RoomModel.updateOne(
         { roomId, "strokes.id": shape.id },
         { $set: { "strokes.$": shape } }
-      );
-    } catch (err) {
-      console.error('Error updating shape for', roomId, err);
+      ).catch((err) => {
+        console.error(`[Database] Error updating shape for ${roomId}:`, err);
+      });
     }
   });
 
-  socket.on('shape:delete', async (payload: { roomId: string; shapeId: string }) => {
+  socket.on('shape:delete', (payload: { roomId: string; shapeId: string }) => {
     const validation = ShapeDeletePayloadSchema.safeParse(payload);
     if (!validation.success) {
       console.warn(`[shape:delete] Validation failed for socket ${socket.id}:`, validation.error.format());
@@ -289,19 +380,27 @@ io.on('connection', (socket) => {
     const { roomId, shapeId } = validation.data;
     if (!isRoomMember(socket.id, roomId)) return;
 
+    // 1. Update in-memory state
+    const room = rooms.get(roomId);
+    if (room) {
+      room.strokes = room.strokes.filter((s) => s.id !== shapeId);
+    }
+
+    // 2. Broadcast immediately
     socket.to(roomId).emit('shape:delete', shapeId);
 
-    try {
-      await RoomModel.updateOne(
+    // 3. Persist asynchronously if MongoDB is available
+    if (mongoAvailable) {
+      RoomModel.updateOne(
         { roomId },
         { $pull: { strokes: { id: shapeId } } }
-      );
-    } catch (err) {
-      console.error('Error deleting shape from', roomId, err);
+      ).catch((err) => {
+        console.error(`[Database] Error deleting shape from ${roomId}:`, err);
+      });
     }
   });
 
-  socket.on('board:clear', async (payload: { roomId: string }) => {
+  socket.on('board:clear', (payload: { roomId: string }) => {
     const validation = BoardClearPayloadSchema.safeParse(payload);
     if (!validation.success) {
       console.warn(`[board:clear] Validation failed for socket ${socket.id}:`, validation.error.format());
@@ -315,20 +414,28 @@ io.on('connection', (socket) => {
       return;
     }
 
-    console.log('board:clear from host', socket.id, 'room', roomId);
+    // 1. Update in-memory state
+    const room = rooms.get(roomId);
+    if (room) {
+      room.strokes = [];
+    }
+
+    // 2. Broadcast
+    console.log(`[Board] Cleared by host ${socket.id} in room ${roomId}`);
     socket.to(roomId).emit('board:clear');
 
-    try {
-      await RoomModel.updateOne(
+    // 3. Persist asynchronously if MongoDB is available
+    if (mongoAvailable) {
+      RoomModel.updateOne(
         { roomId },
         { $set: { strokes: [] } }
-      );
-    } catch (err) {
-      console.error('Error clearing room for', roomId, err);
+      ).catch((err) => {
+        console.error(`[Database] Error clearing room for ${roomId}:`, err);
+      });
     }
   });
 
-  socket.on('board:snapshot', async (payload: { roomId: string; strokes: Record<string, any>[] }) => {
+  socket.on('board:snapshot', (payload: { roomId: string; strokes: Record<string, any>[] }) => {
     const validation = BoardSnapshotPayloadSchema.safeParse(payload);
     if (!validation.success) {
       console.warn(`[board:snapshot] Validation failed for socket ${socket.id}:`, validation.error.format());
@@ -337,17 +444,27 @@ io.on('connection', (socket) => {
     const { roomId, strokes } = validation.data;
     if (!isRoomMember(socket.id, roomId)) return;
 
-    console.log('board:snapshot from', socket.id, 'room', roomId);
+    // 1. Update in-memory state
+    const room = rooms.get(roomId);
+    if (room) {
+      room.strokes = strokes;
+    } else {
+      rooms.set(roomId, { roomId, strokes });
+    }
+
+    // 2. Broadcast snapshot to other clients
+    console.log(`[Board] Snapshot received from ${socket.id} in room ${roomId} (${strokes.length} strokes)`);
     socket.to(roomId).emit('board:snapshot', strokes);
 
-    try {
-      await RoomModel.findOneAndUpdate(
+    // 3. Persist asynchronously if MongoDB is available
+    if (mongoAvailable) {
+      RoomModel.findOneAndUpdate(
         { roomId },
         { $set: { strokes } },
         { upsert: true }
-      );
-    } catch (err) {
-      console.error('Error saving room snapshot for', roomId, err);
+      ).catch((err) => {
+        console.error(`[Database] Error saving room snapshot for ${roomId}:`, err);
+      });
     }
   });
 
@@ -410,7 +527,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    console.log('Client disconnected:', socket.id);
+    console.log('[Socket] Client disconnected:', socket.id);
     const user = users.get(socket.id);
     if (user) {
       const { roomId } = user;
@@ -436,18 +553,39 @@ io.on('connection', (socket) => {
   });
 });
 
-const mongoUri = process.env.MONGO_URI || 'mongodb://localhost:27017/syncboard';
+// START HTTP + Socket.IO Server IMMEDIATELY (Never blocked by database)
+server.listen(PORT, () => {
+  console.log(`=========================================`);
+  console.log(`🚀 SyncBoard Server running on port ${PORT}`);
+  console.log(`🌐 Public URL: ${SERVER_PUBLIC_URL}`);
+  console.log(`=========================================`);
+});
 
-mongoose
-  .connect(mongoUri)
-  .then(() => {
-    console.log('Connected to MongoDB');
+// Asynchronously attempt MongoDB connection (Optional Persistence)
+const mongoUri = process.env.MONGO_URI;
 
-    const PORT = process.env.PORT || 7860;
-    server.listen(PORT, () => {
-      console.log(`Server running on http://localhost:${PORT}`);
-    });
-  })
-  .catch((err) => {
-    console.error('MongoDB connection error', err);
+if (mongoUri) {
+  mongoose.connection.on('connected', () => {
+    mongoAvailable = true;
+    console.log('✅ [Database] MongoDB connected. Permanent persistence enabled.');
   });
+
+  mongoose.connection.on('error', (err) => {
+    mongoAvailable = false;
+    console.warn('⚠️ [Database] MongoDB error. Running SyncBoard with in-memory persistence.', err.message);
+  });
+
+  mongoose.connection.on('disconnected', () => {
+    mongoAvailable = false;
+    console.warn('⚠️ [Database] MongoDB disconnected. Running SyncBoard with in-memory persistence.');
+  });
+
+  mongoose
+    .connect(mongoUri, { serverSelectionTimeoutMS: 4000 })
+    .catch((err) => {
+      mongoAvailable = false;
+      console.warn('⚠️ [Database] MongoDB connection failed. Running SyncBoard with in-memory persistence.');
+    });
+} else {
+  console.log('ℹ️ [Database] MONGO_URI not configured. Running SyncBoard with in-memory persistence.');
+}

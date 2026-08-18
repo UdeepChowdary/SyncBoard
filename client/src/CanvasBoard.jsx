@@ -73,6 +73,7 @@ function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
   const [remoteLasers, setRemoteLasers] = useState({})
   const [remoteSelections, setRemoteSelections] = useState({})
   const [isHost, setIsHost] = useState(false)
+  const [connectionStatus, setConnectionStatus] = useState(socket?.connected ? 'connected' : 'reconnecting')
 
   // Emit selection changes
   useEffect(() => {
@@ -84,13 +85,39 @@ function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
   useEffect(() => {
     if (!socket) return
 
-    socket.emit('join_room', roomId, nickname)
+    const joinCurrentRoom = (pin) => {
+      console.log(`[Socket] Joining room "${roomId}" as "${nickname}" (socketId: ${socket.id})`);
+      socket.emit('join_room', roomId, nickname, pin);
+    };
+
+    if (socket.connected) {
+      setConnectionStatus('connected');
+      joinCurrentRoom();
+    } else {
+      setConnectionStatus('reconnecting');
+    }
+
+    const handleConnect = () => {
+      console.log(`[Socket] Connected / Reconnected with id: ${socket.id}`);
+      setConnectionStatus('connected');
+      joinCurrentRoom();
+    };
+
+    const handleDisconnect = (reason) => {
+      console.warn(`[Socket] Disconnected: ${reason}`);
+      setConnectionStatus('disconnected');
+    };
+
+    const handleConnectError = (err) => {
+      console.warn(`[Socket] Connection error:`, err.message);
+      setConnectionStatus('reconnecting');
+    };
 
     const handleJoinError = ({ message }) => {
       if (message === 'Invalid passcode' || message === 'Passcode required') {
         const pin = prompt('Enter 4-digit PIN for this locked room:');
         if (pin) {
-          socket.emit('join_room', roomId, nickname, pin);
+          joinCurrentRoom(pin);
         } else {
           window.location.href = '/';
         }
@@ -98,85 +125,88 @@ function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
         alert(message);
         window.location.href = '/';
       }
-    }
+    };
 
     const handleRoomLocked = () => {
       alert('This room has been locked by a user.');
-    }
-
-    socket.on('room:join_error', handleJoinError)
-    socket.on('room:locked', handleRoomLocked)
+    };
 
     const handleRemoteStroke = (stroke) => {
-      setStrokes((prev) => [...prev, stroke])
-    }
+      setStrokes((prev) => [...prev, stroke]);
+    };
 
     const handleRemoteUpdate = (updatedShape) => {
-      setStrokes((prev) => prev.map(s => s.id === updatedShape.id ? updatedShape : s))
-    }
+      setStrokes((prev) => prev.map(s => s.id === updatedShape.id ? updatedShape : s));
+    };
 
     const handleRemoteDelete = (shapeId) => {
-      setStrokes((prev) => prev.filter(s => s.id !== shapeId))
+      setStrokes((prev) => prev.filter(s => s.id !== shapeId));
       if (selectedId === shapeId) {
-        setSelectedId(null)
+        setSelectedId(null);
       }
-    }
+    };
 
     const handleRemoteClear = () => {
-      setStrokes([])
-      setUndoStack([])
-      setRedoStack([])
-      setSelectedId(null)
-    }
+      setStrokes([]);
+      setUndoStack([]);
+      setRedoStack([]);
+      setSelectedId(null);
+    };
 
     const handleRemoteSnapshot = (remoteStrokes) => {
-      setStrokes(remoteStrokes || [])
-      setUndoStack([])
-      setRedoStack([])
-      setSelectedId(null)
-    }
+      console.log(`[Room] Received board snapshot with ${remoteStrokes?.length || 0} strokes`);
+      setStrokes(remoteStrokes || []);
+      setUndoStack([]);
+      setRedoStack([]);
+      setSelectedId(null);
+    };
 
     const handleCursorMove = ({ socketId, x, y, nickname: remoteName, color }) => {
       setRemoteUsers((prev) => ({
         ...prev,
         [socketId]: { x, y, nickname: remoteName, color }
-      }))
-    }
+      }));
+    };
 
     const handleUserLeft = ({ socketId }) => {
       setRemoteUsers((prev) => {
-        const next = { ...prev }
-        delete next[socketId]
-        return next
-      })
+        const next = { ...prev };
+        delete next[socketId];
+        return next;
+      });
       setRemoteLasers((prev) => {
-        const next = { ...prev }
-        delete next[socketId]
-        return next
-      })
-    }
+        const next = { ...prev };
+        delete next[socketId];
+        return next;
+      });
+      setRemoteSelections((prev) => {
+        const next = { ...prev };
+        delete next[socketId];
+        return next;
+      });
+    };
 
     const handleRoomUsers = (users) => {
-      setConnectedUsers(users)
+      setConnectedUsers(users);
       // Determine if current socket is the host
-      const me = users.find(u => u.socketId === socket.id)
-      if (me) setIsHost(!!me.isHost)
-    }
+      const me = users.find(u => u.socketId === socket.id);
+      if (me) setIsHost(!!me.isHost);
+    };
 
     const handleLaserUpdate = ({ socketId, points, color }) => {
       setRemoteLasers((prev) => ({
         ...prev,
         [socketId]: { points, color }
-      }))
-    }
+      }));
+    };
 
     const handleLaserClear = ({ socketId }) => {
       setRemoteLasers((prev) => {
-        const next = { ...prev }
-        delete next[socketId]
-        return next
-      })
-    }
+        const next = { ...prev };
+        delete next[socketId];
+        return next;
+      });
+    };
 
     const handleSelectionUpdate = ({ socketId, shapeId, color }) => {
       setRemoteSelections(prev => {
@@ -190,34 +220,42 @@ function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
       });
     };
 
-    socket.on('stroke:created', handleRemoteStroke)
-    socket.on('shape:update', handleRemoteUpdate)
-    socket.on('shape:delete', handleRemoteDelete)
-    socket.on('board:clear', handleRemoteClear)
-    socket.on('board:snapshot', handleRemoteSnapshot)
-    socket.on('cursor:move', handleCursorMove)
-    socket.on('user:left', handleUserLeft)
-    socket.on('room:users', handleRoomUsers)
-    socket.on('laser:update', handleLaserUpdate)
-    socket.on('laser:clear', handleLaserClear)
-    socket.on('selection:update', handleSelectionUpdate)
+    socket.on('connect', handleConnect);
+    socket.on('disconnect', handleDisconnect);
+    socket.on('connect_error', handleConnectError);
+    socket.on('room:join_error', handleJoinError);
+    socket.on('room:locked', handleRoomLocked);
+    socket.on('stroke:created', handleRemoteStroke);
+    socket.on('shape:update', handleRemoteUpdate);
+    socket.on('shape:delete', handleRemoteDelete);
+    socket.on('board:clear', handleRemoteClear);
+    socket.on('board:snapshot', handleRemoteSnapshot);
+    socket.on('cursor:move', handleCursorMove);
+    socket.on('user:left', handleUserLeft);
+    socket.on('room:users', handleRoomUsers);
+    socket.on('laser:update', handleLaserUpdate);
+    socket.on('laser:clear', handleLaserClear);
+    socket.on('selection:update', handleSelectionUpdate);
 
     return () => {
-      socket.off('stroke:created', handleRemoteStroke)
-      socket.off('shape:update', handleRemoteUpdate)
-      socket.off('shape:delete', handleRemoteDelete)
-      socket.off('board:clear', handleRemoteClear)
-      socket.off('board:snapshot', handleRemoteSnapshot)
-      socket.off('cursor:move', handleCursorMove)
-      socket.off('user:left', handleUserLeft)
-      socket.off('room:users', handleRoomUsers)
-      socket.off('laser:update', handleLaserUpdate)
-      socket.off('laser:clear', handleLaserClear)
-      socket.off('selection:update', handleSelectionUpdate)
-      socket.off('room:join_error', handleJoinError)
-      socket.off('room:locked', handleRoomLocked)
-    }
-  }, [socket, roomId, nickname])
+      socket.off('connect', handleConnect);
+      socket.off('disconnect', handleDisconnect);
+      socket.off('connect_error', handleConnectError);
+      socket.off('room:join_error', handleJoinError);
+      socket.off('room:locked', handleRoomLocked);
+      socket.off('stroke:created', handleRemoteStroke);
+      socket.off('shape:update', handleRemoteUpdate);
+      socket.off('shape:delete', handleRemoteDelete);
+      socket.off('board:clear', handleRemoteClear);
+      socket.off('board:snapshot', handleRemoteSnapshot);
+      socket.off('cursor:move', handleCursorMove);
+      socket.off('user:left', handleUserLeft);
+      socket.off('room:users', handleRoomUsers);
+      socket.off('laser:update', handleLaserUpdate);
+      socket.off('laser:clear', handleLaserClear);
+      socket.off('selection:update', handleSelectionUpdate);
+    };
+  }, [socket, roomId, nickname]);
 
   // Spacebar panning
   useEffect(() => {
@@ -1015,6 +1053,19 @@ function CanvasBoard({ socket, roomId = 'default-room', nickname = 'Guest' }) {
       />
 
       <div className="relative flex-1 bg-slate-900 bg-dot-pattern overflow-hidden m-4 mt-0 rounded-2xl border border-slate-700/50 shadow-[inset_0_4px_30px_rgba(0,0,0,0.5)]">
+        {/* Connection Status Indicator */}
+        <div className="absolute bottom-4 left-4 z-40 flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-950/80 backdrop-blur-md border border-slate-800/80 text-xs font-medium shadow-lg select-none">
+          <span className={`w-2 h-2 rounded-full transition-colors duration-300 ${
+            connectionStatus === 'connected' ? 'bg-emerald-500 shadow-[0_0_8px_#10b981]' :
+            connectionStatus === 'reconnecting' ? 'bg-amber-500 animate-pulse shadow-[0_0_8px_#f59e0b]' :
+            'bg-rose-500 shadow-[0_0_8px_#f43f5e]'
+          }`} />
+          <span className="text-slate-300">
+            {connectionStatus === 'connected' ? 'Live Sync' :
+             connectionStatus === 'reconnecting' ? 'Reconnecting...' : 'Offline'}
+          </span>
+        </div>
+
         {/* Text Area Overlay for Editing */}
         {textEditVisible && (
           <textarea

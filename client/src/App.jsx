@@ -5,7 +5,7 @@ import { io } from 'socket.io-client'
 import { BrowserRouter, Routes, Route, useNavigate, useParams, useLocation } from 'react-router-dom'
 import CanvasBoard from './CanvasBoard'
 
-const SOCKET_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:7860'
+const SOCKET_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:5000'
 const socket = io(SOCKET_URL)
 
 function RoomPage() {

@@ -39,41 +39,73 @@ SyncBoard is a real-time collaborative whiteboard application that enables teams
 - **TypeScript** - 15.4%
 - **Other** - 1.7%
 
+## Architecture & Realtime Synchronization
+
+SyncBoard uses a **hybrid in-memory + optional persistence** architecture designed for ultra-low latency, high resilience, and zero setup friction:
+
+```
+                      SyncBoard Client
+                    (React + React-Konva)
+                             │
+                             ▼ Socket.IO WebSockets
+                      Node.js Server
+                   (Express + Socket.IO)
+                             │
+                             ▼ Immediate In-Memory Store
+                     Active Room State
+                     (In-Memory Maps)
+                             │
+                             ▼ Async Background Save (If Available)
+                          MongoDB
+                    (Optional Persistence)
+```
+
+* **⚡ Real-Time Collaboration Without MongoDB**: The backend server boots immediately and maintains active room states (strokes, shapes, text, sticky notes, host info, and passcodes) in memory. Two or more clients can collaborate in real-time out of the box with **zero database configuration**.
+* **💾 Optional Permanent Persistence**: If a `MONGO_URI` is provided (e.g. via a free MongoDB Atlas cluster), the server automatically connects in the background and mirrors room snapshots for long-term persistence across server restarts. If MongoDB goes down or disconnects, the server gracefully continues serving real-time events without interrupting connected users.
+* **🔄 Automatic Reconnection & State Recovery**: If a client temporarily drops connection, Socket.IO auto-reconnects, rejoins the room, and synchronizes the latest room snapshot seamlessly.
+
+> [!NOTE]
+> **Single-Instance Note**: In-memory room state is held on the active Node.js server instance. For zero-cost single-instance deployments (Render, Hugging Face Spaces, Koyeb, Railway), this provides high-speed collaboration without external dependencies.
+
+---
+
 ## Prerequisites
 
-Before you begin, ensure you have the following installed:
 - **Node.js** (v18 or higher)
-- **npm** or **yarn** (Node package manager)
-- **MongoDB** (Local installation or MongoDB Atlas cloud database)
-- **Git** (For cloning the repository)
+- **npm** or **yarn**
+- **MongoDB** *(Optional)*: Only needed if you want boards to persist across server restarts.
 
-## Installation
+---
 
-### Step 1: Clone the Repository
+## Local Development Setup
+
+### 1. Clone the Repository
 
 ```bash
 git clone https://github.com/UdeepChowdary/SyncBoard.git
 cd SyncBoard
 ```
 
-### Step 2: Setup Server
+### 2. Setup & Start Backend Server
 
 ```bash
 cd server
 npm install
-cp .env.example .env
-# Edit .env and add your MongoDB connection string
 npm run dev
 ```
 
-**Server Environment Variables:**
+*The server will start on `http://localhost:5000`.*
+
+**Optional Server `.env` Configuration (`server/.env`):**
 ```env
-MONGO_URI=mongodb://your-connection-string
-CLIENT_URL=http://localhost:5173
 PORT=5000
+SERVER_PUBLIC_URL=http://localhost:5000
+CLIENT_URL=http://localhost:5173
+# Optional: Provide MONGO_URI for persistent room storage. Leave blank for in-memory mode.
+MONGO_URI=
 ```
 
-### Step 3: Setup Client
+### 3. Setup & Start Frontend Client
 
 ```bash
 cd ../client
@@ -81,44 +113,39 @@ npm install
 npm run dev
 ```
 
-**Client Environment Variables:**
+*The client will start on `http://localhost:5173`.*
+
+**Client `.env` Configuration (`client/.env`):**
 ```env
 VITE_SERVER_URL=http://localhost:5000
 ```
 
-### Step 4: Access the Application
+### 4. Open and Collaborate!
 
-Open your browser and navigate to `http://localhost:5173`
+Open `http://localhost:5173` in two different browser tabs, create/join the same room (e.g. `room123`), and start collaborating!
 
-## Usage
+---
 
-1. **Create a Session** - Start a new collaborative session
-2. **Share Link** - Invite others by sharing the session link
-3. **Draw & Collaborate** - Use the tools to create and edit in real-time
-4. **Export** - Download your work as an image when done
+## 🚀 Free Zero-Cost Deployment Guide
 
-## Deployment
+SyncBoard is designed to run 100% free with zero paid infrastructure.
 
-### Deploying to Render.com
+### Option A: Render.com (Blueprint Deployment)
+The repository includes a pre-configured [`render.yaml`](render.yaml) blueprint:
+1. Fork or push this repository to GitHub.
+2. Log into [Render.com](https://render.com) and click **New > Blueprint**.
+3. Connect your repository. Render will automatically create:
+   - **Backend Web Service** (`syncboard-server`) on Node.js.
+   - **Frontend Static Site** (`syncboard-client`).
+4. (Optional) Add a free [MongoDB Atlas M0](https://www.mongodb.com/atlas/database) connection string to the `MONGO_URI` environment variable.
 
-#### Server Deployment:
-1. Create a new Web Service on Render.com
-2. Connect your GitHub repository
-3. Set environment variables:
-   - `MONGO_URI` - Your MongoDB connection string
-   - `CLIENT_URL` - Your deployed client URL
+### Option B: Hugging Face Spaces (24/7 Free Docker)
+Hugging Face Spaces offers **free 24/7 hosting with no sleep**:
+1. Create a new Space on [Hugging Face](https://huggingface.co/spaces) with SDK: **Docker**.
+2. Push this repository. The root [`Dockerfile`](Dockerfile) automatically builds the server on port `7860`.
+3. Deploy the frontend on [Vercel](https://vercel.com) or [Cloudflare Pages](https://pages.cloudflare.com) for free with `VITE_SERVER_URL=https://<your-hf-space>.hf.space`.
 
-#### Client Deployment:
-1. Create a new Static Site on Render.com
-2. Build command: `cd client && npm run build`
-3. Publish directory: `client/dist`
-4. Set environment variables:
-   - `VITE_SERVER_URL` - Your deployed server URL
-
-### Alternative Deployment Options
-- **Heroku** - Traditional PaaS hosting
-- **Vercel** - Optimal for frontend deployment
-- **AWS/Azure/Google Cloud** - Full control and scalability
+---
 
 ## Contributing
 
@@ -130,38 +157,11 @@ We welcome contributions! To contribute:
 4. Push to the branch (`git push origin feature/AmazingFeature`)
 5. Open a Pull Request
 
-## Roadmap
-
-🚀 **Planned Features:**
-- Video/Audio chat integration
-- Real-time cursor animations
-- Drawing templates and stickers
-- Advanced shape tools (polygons, curves)
-- Collaborative code editor
-- Mobile app (React Native)
-- Advanced permissions and roles
+---
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Author
-
-**Udeep Chowdary**
-- GitHub: [@UdeepChowdary](https://github.com/UdeepChowdary)
-
-## Support
-
-For issues, questions, or suggestions:
-- Open an issue on [GitHub Issues](https://github.com/UdeepChowdary/SyncBoard/issues)
-- Check existing documentation and FAQs
-
-## Acknowledgments
-
-- React and Vite communities for excellent tools
-- Konva.js for canvas rendering capabilities
-- Socket.io for real-time communication
-- MongoDB for reliable database solutions
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ---
 
